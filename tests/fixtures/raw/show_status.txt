@@ -1,0 +1,7 @@
+1000-BIRD 3.1.7
+1011-Router ID is 10.0.0.1
+ Hostname is c-6a8c3c11-145d6674-da1004003283
+ Current server time is 2026-08-24 13:27:04.188
+ Last reboot on 2026-08-24 13:22:41.388
+ Last reconfiguration on 2026-08-24 13:22:41.388
+0013 Daemon is up and running

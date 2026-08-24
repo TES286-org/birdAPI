@@ -1,0 +1,14 @@
+1007-Table master4:
+ 192.0.2.0/24         blackhole [static_test 13:22:41.388] ! (200)
+ 198.51.100.0/24      blackhole [static_test 13:22:41.388] ! (200)
+ 203.0.113.0/24       blackhole [static_test 13:22:41.388] ! (200)
+ 10.0.0.0/8           blackhole [static_test2 13:22:41.388] ! (200)
+ 172.16.0.0/12        blackhole [static_test2 13:22:41.388] ! (200)
+ 0.0.0.0/0            unicast [kernel1 13:22:42.389] * (10)
+ 	via 21.0.0.1 on eth0 onlink
+ 6 of 6 routes for 6 networks in table master4
+ 
+ Table master6:
+ 0 of 0 routes for 0 networks in table master6
+ 
+0014 Total: 6 of 6 routes for 6 networks in 2 tables

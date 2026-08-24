@@ -1,0 +1,11 @@
+1001-lo up (index=1)
+1004-	MultiAccess AdminUp LinkUp Loopback Ignored MTU=65536
+1003-	127.0.0.1/8 (Preferred, scope host)
+ 	::1/128 (Preferred, scope host)
+1001-dummy0 down (index=2)
+1004-	MultiAccess Broadcast Multicast AdminDown LinkDown MTU=1500
+1001-eth0 up (index=3)
+1004-	MultiAccess Broadcast Multicast AdminUp LinkUp MTU=1450
+1003-	21.0.15.216/32 (Preferred, scope univ)
+ 	fe80::3859:dbff:fed6:ea22/64 (Preferred, scope link)
+0000 

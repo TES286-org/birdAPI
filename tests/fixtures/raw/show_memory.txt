@@ -1,0 +1,14 @@
+1018-BIRD memory usage
+                   Effective    Overhead
+ Routing tables:    147.1 kB     11.5 kB
+ Route attributes:   72.5 kB     14.8 kB
+ Protocols:           9.8 kB   4640.0  B
+ Current config:   8351.0  B    504.0  B
+ Standby memory:      0.0  B    240.0 kB
+ Total:             376.2 kB    316.3 kB
+ 
+ Active pages:      144.0 kB
+ Kept free pages:   240.0 kB
+ Cold free pages:     0.0  B
+1028-Hot page cache depleted while in RCU: 0
+0000 

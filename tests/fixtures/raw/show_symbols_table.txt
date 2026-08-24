@@ -1,0 +1,3 @@
+1010-master6 	routing table
+ master4 	routing table
+0000 

@@ -1,0 +1,5 @@
+2005-Interface  State  IPv4 address       IPv6 address
+1005-lo         up     127.0.0.1/8        ::1/128
+ dummy0     down                      
+ eth0       up     21.0.15.216/32     
+0000 

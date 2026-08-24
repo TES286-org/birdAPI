@@ -1,0 +1,29 @@
+1007-Table master4:
+ 192.0.2.0/24         blackhole [static_test 13:22:41.388] ! (200)
+1012-	preference: 200
+ 	source: static
+1008-	Internal route handling values: 0L 3G 0S id 1
+1007-198.51.100.0/24      blackhole [static_test 13:22:41.388] ! (200)
+1012-	preference: 200
+ 	source: static
+1008-	Internal route handling values: 0L 3G 0S id 2
+1007-203.0.113.0/24       blackhole [static_test 13:22:41.388] ! (200)
+1012-	preference: 200
+ 	source: static
+1008-	Internal route handling values: 0L 3G 0S id 3
+1007-10.0.0.0/8           blackhole [static_test2 13:22:41.388] ! (200)
+1012-	preference: 200
+ 	source: static
+1008-	Internal route handling values: 0L 4G 0S id 4
+1007-172.16.0.0/12        blackhole [static_test2 13:22:41.388] ! (200)
+1012-	preference: 200
+ 	source: static
+1008-	Internal route handling values: 0L 4G 0S id 5
+1007-0.0.0.0/0            unicast [kernel1 13:22:42.389] * (10)
+ 	via 21.0.0.1 on eth0 onlink
+1012-	preference: 10
+ 	source: inherit
+ 	krt_source: 3
+ 	krt_metric: 0
+1008-	Internal route handling values: 0L 2G 5S id 6
+0000 

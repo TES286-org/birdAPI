@@ -1,0 +1,7 @@
+2002-Name       Proto      Table      State  Since         Info
+1002-static_test Static     master4    up     13:22:41.388  
+ static_test2 Static     master4    up     13:22:41.388  
+ device1    Device     ---        up     13:22:41.388  
+ kernel1    Kernel     master4    up     13:22:41.388  
+ direct1    Direct     ---        up     13:22:41.388  
+0000 
