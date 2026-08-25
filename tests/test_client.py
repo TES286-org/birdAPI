@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import pytest
-from conftest import make_client_with_responses
+from conftest import FakeBirdConnection, make_client_with_responses
 
-from bird_api import BirdClient
-from bird_api.exceptions import BirdCommandError, BirdConnectionError
+from bird_api import BirdClient, RouteFilter, RouteQuery
+from bird_api.exceptions import BirdCommandError, BirdConnectionError, BirdValidationError
 
 
 class TestClientLifecycle:
@@ -188,7 +188,7 @@ class TestClientCommands:
 
     def test_reload_invalid_direction(self) -> None:
         client = make_client_with_responses([])
-        with pytest.raises(ValueError, match="direction must be"):
+        with pytest.raises(ValueError, match="direction"):
             client.reload("direct1", direction="sideways")  # type: ignore[arg-type]
 
     def test_dump_invalid_kind(self) -> None:
@@ -264,3 +264,282 @@ class TestClientAsyncCallback:
         # we check it's the same callable (using ==, since bound methods
         # do not compare with `is`).
         assert client._conn._on_async == captured.append
+
+
+# ---------------------------------------------------------------------------
+# Injection-safety integration (validation wired into every client method)
+# ---------------------------------------------------------------------------
+
+# A minimal well-formed "show route" response for reuse below.
+_ROUTE_OK = (
+    b"1007-Table master4:\n"
+    b" 192.0.2.0/24         blackhole [static_test 13:22:41.388] ! (200)\n"
+    b"0000 \n"
+)
+_PROTOCOLS_OK = (
+    b"2002-Name       Proto      Table      State  Since         Info\n"
+    b"1002-static_test Static     master4    up     13:22:41.388  \n"
+    b"0000 \n"
+)
+
+
+class TestClientInjectionGuards:
+    """Every user-facing input slot must validate BEFORE any I/O happens."""
+
+    def _client(self) -> tuple[BirdClient, FakeBirdConnection]:
+        client = make_client_with_responses([_ROUTE_OK])
+        return client, client._conn  # type: ignore[return-value]
+
+    def test_show_route_prefix_rejects_newline(self) -> None:
+        client, conn = self._client()
+        with pytest.raises(BirdValidationError, match="injection"):
+            client.show_route_prefix("10.0.0.0/8\ndown")
+        assert conn.calls == []  # nothing reached the wire
+
+    def test_show_route_for_rejects_garbage(self) -> None:
+        client, conn = self._client()
+        with pytest.raises(BirdValidationError):
+            client.show_route_for("not-an-ip; down")
+        assert conn.calls == []
+
+    def test_show_route_in_rejects_host_bits(self) -> None:
+        client, conn = self._client()
+        with pytest.raises(BirdValidationError, match="host bits"):
+            client.show_route_in("192.0.2.1/24")
+        assert conn.calls == []
+
+    def test_show_route_table_rejects_spaces(self) -> None:
+        client, conn = self._client()
+        with pytest.raises(BirdValidationError):
+            client.show_route_table("master4 extra")
+        assert conn.calls == []
+
+    def test_show_route_protocol_rejects_wildcard(self) -> None:
+        # `show route protocol` takes a symbol, not a pattern.
+        client, conn = self._client()
+        with pytest.raises(BirdValidationError):
+            client.show_route_protocol("bgp*")
+        assert conn.calls == []
+
+    def test_eval_rejects_newline(self) -> None:
+        client, conn = self._client()
+        with pytest.raises(BirdValidationError):
+            client.eval("1+2\ndown")
+        assert conn.calls == []
+
+    def test_configure_rejects_quote_breakout(self) -> None:
+        client, conn = self._client()
+        with pytest.raises(BirdValidationError):
+            client.configure('/tmp/x.conf" down')
+        assert conn.calls == []
+
+    def test_enable_rejects_newline_pattern(self) -> None:
+        client, conn = self._client()
+        with pytest.raises(BirdValidationError):
+            client.enable("bgp*\ndown")
+        assert conn.calls == []
+
+    def test_dump_rejects_bad_kind(self) -> None:
+        client, conn = self._client()
+        with pytest.raises(BirdValidationError):
+            client.dump("everything", "/tmp/dump.txt")
+        assert conn.calls == []
+
+    def test_raw_rejects_newline(self) -> None:
+        client, conn = self._client()
+        with pytest.raises(BirdValidationError):
+            client.raw("show status\ndown")
+        assert conn.calls == []
+
+    def test_bgp_sessions_rejects_bad_pattern(self) -> None:
+        client, conn = self._client()
+        with pytest.raises(BirdValidationError):
+            client.bgp_sessions(pattern="peer*\ndown")
+        assert conn.calls == []
+
+    def test_route_lookup_rejects_bad_address(self) -> None:
+        client, conn = self._client()
+        with pytest.raises(BirdValidationError):
+            client.route_lookup("10.0.0.0/8")
+        assert conn.calls == []
+
+
+class TestClientPatternQuoting:
+    def test_pattern_quoted_on_wire(self) -> None:
+        client = make_client_with_responses([_PROTOCOLS_OK])
+        client.show_protocols(pattern="static*")
+        assert client._conn.calls == ['show protocols "static*"']  # type: ignore[attr-defined]
+
+    def test_bare_identifier_pattern_unquoted(self) -> None:
+        client = make_client_with_responses([_PROTOCOLS_OK])
+        client.show_protocols(pattern="static_test")
+        assert client._conn.calls == ["show protocols static_test"]  # type: ignore[attr-defined]
+
+    def test_all_keyword_unquoted(self) -> None:
+        client = make_client_with_responses([_PROTOCOLS_OK])
+        client.disable("all")
+        assert client._conn.calls == ["disable all"]  # type: ignore[attr-defined]
+
+    def test_wildcard_quoted_for_actions(self) -> None:
+        canned = b"0019-static_test: disabled\n0000 \n"
+        client = make_client_with_responses([canned])
+        client.disable("static*")
+        assert client._conn.calls == ['disable "static*"']  # type: ignore[attr-defined]
+
+    def test_bgp_sessions_pattern(self) -> None:
+        client = make_client_with_responses([_PROTOCOLS_OK])
+        client.bgp_sessions(pattern="peer_*")
+        assert client._conn.calls == ['show protocols all "peer_*"']  # type: ignore[attr-defined]
+
+
+class TestClientReadOnly:
+    def test_show_commands_pass(self) -> None:
+        client = make_client_with_responses([_PROTOCOLS_OK, _ROUTE_OK])
+        client._conn.read_only = True  # type: ignore[attr-defined]
+        client.show_protocols()
+        client.show_route_prefix("192.0.2.0/24")
+        assert len(client._conn.calls) == 2  # type: ignore[attr-defined]
+
+    def test_mutating_commands_rejected(self) -> None:
+        client = make_client_with_responses([])
+        client._conn.read_only = True  # type: ignore[attr-defined]
+        for call in (
+            lambda: client.down(),
+            lambda: client.disable("all"),
+            lambda: client.configure("/tmp/x.conf"),
+            lambda: client.dump("routes", "/tmp/d.txt"),
+            lambda: client.raw("restart all"),
+        ):
+            with pytest.raises(BirdValidationError, match="read-only"):
+                call()
+        assert client._conn.calls == []  # type: ignore[attr-defined]
+
+    def test_configure_status_allowed(self) -> None:
+        canned = b"0018-Configuration OK\n0000 \n"
+        client = make_client_with_responses([canned])
+        client._conn.read_only = True  # type: ignore[attr-defined]
+        client.configure_status()
+        assert client._conn.calls == ["configure status"]  # type: ignore[attr-defined]
+
+    def test_real_client_read_only_flag(self) -> None:
+        client = BirdClient(read_only=True)
+        assert client.read_only is True
+        assert client._conn._read_only is True  # type: ignore[attr-defined]
+
+
+class TestClientComplexQueries:
+    def test_show_route_query(self) -> None:
+        client = make_client_with_responses([_ROUTE_OK])
+        result = client.show_route_query(
+            RouteQuery().table("master4").protocol("static_test").all_details()
+        )
+        assert client._conn.calls == [  # type: ignore[attr-defined]
+            "show route table master4 all protocol static_test"
+        ]
+        assert result.entries[0].prefix == "192.0.2.0/24"
+
+    def test_show_route_query_where_filter(self) -> None:
+        client = make_client_with_responses([_ROUTE_OK])
+        client.show_route_query(RouteQuery().where(RouteFilter.protocol("static_test")))
+        assert client._conn.calls == [  # type: ignore[attr-defined]
+            'show route where proto = "static_test"'
+        ]
+
+    def test_route_lookup_translates_network_not_found(self) -> None:
+        canned = b"8001 Network not found\n"
+        client = make_client_with_responses([canned])
+        with pytest.raises(BirdCommandError):
+            client.show_route_for("203.0.113.99")  # strict method still raises
+        client2 = make_client_with_responses([canned])
+        result = client2.route_lookup("203.0.113.99", table="master4")
+        assert result.entries == []
+        assert "Network not found" in result.raw_text
+
+    def test_route_exists_false_on_network_not_found(self) -> None:
+        client = make_client_with_responses([b"8001 Network not found\n"])
+        assert client.route_exists("203.0.113.0/24") is False
+
+    def test_route_exists_true(self) -> None:
+        client = make_client_with_responses([_ROUTE_OK])
+        assert client.route_exists("192.0.2.0/24") is True
+
+    def test_count_routes_table(self) -> None:
+        canned = (
+            b"1007-6 of 6 routes for 6 networks in table master4\n"
+            b"0014 Total: 6 of 6 routes for 6 networks in 2 tables\n"
+        )
+        client = make_client_with_responses([canned])
+        assert client.count_routes(table="master4") == 6
+        assert client._conn.calls == ["show route table master4 count"]  # type: ignore[attr-defined]
+
+    def test_count_routes_all_tables(self) -> None:
+        canned = (
+            b"1007-6 of 6 routes for 6 networks in table master4\n"
+            b" 0 of 0 routes for 0 networks in table master6\n"
+            b"0014 Total: 6 of 6 routes for 6 networks in 2 tables\n"
+        )
+        client = make_client_with_responses([canned])
+        assert client.count_routes() == 6
+        assert client._conn.calls == ["show route table all count"]  # type: ignore[attr-defined]
+
+    def test_get_protocol_found(self) -> None:
+        canned = (
+            b"2002-Name       Proto      Table      State  Since         Info\n"
+            b"1002-static_test Static     master4    up     13:22:41.388  \n"
+            b"1006-  Created:            13:22:41.388\n"
+            b"0000 \n"
+        )
+        client = make_client_with_responses([canned])
+        detail = client.get_protocol("static_test")
+        assert detail is not None
+        assert detail.name == "static_test"
+        assert detail.created == "13:22:41.388"
+
+    def test_get_protocol_not_found(self) -> None:
+        # Unknown symbol -> daemon-side syntax error 9001 -> translated to None.
+        client = make_client_with_responses([b"9001 syntax error, unexpected CF_SYM_UNDEFINED\n"])
+        assert client.get_protocol("no_such_protocol") is None
+
+    def test_get_protocol_other_error_reraised(self) -> None:
+        # 8002 (not 8003, which now means "no match") must still propagate.
+        client = make_client_with_responses([b"8002 something else\n"])
+        with pytest.raises(BirdCommandError):
+            client.get_protocol("static_test")
+
+
+class TestNoMatchTranslations:
+    """Pattern queries translate daemon-side 'No protocols match' (8003)
+    into empty results instead of raising — mirroring route_lookup's
+    handling of 8001."""
+
+    def test_show_protocols_pattern_no_match(self) -> None:
+        client = make_client_with_responses([b"8003 No protocols match\n"])
+        result = client.show_protocols(pattern="zzz*")
+        assert result.rows == []
+        assert "No protocols match" in result.raw_text
+        assert client._conn.calls == ['show protocols "zzz*"']  # type: ignore[attr-defined]
+
+    def test_show_protocols_all_pattern_no_match(self) -> None:
+        client = make_client_with_responses([b"8003 No protocols match\n"])
+        result = client.show_protocols_all(pattern="zzz*")
+        assert result.rows == []
+        assert result.details == []
+
+    def test_find_protocols_no_match(self) -> None:
+        client = make_client_with_responses([b"8003 No protocols match\n"])
+        assert client.find_protocols("zzz*").rows == []
+
+    def test_bgp_sessions_pattern_no_match(self) -> None:
+        client = make_client_with_responses([b"8003 No protocols match\n"])
+        result = client.bgp_sessions(pattern="zzz*")
+        assert result.sessions == []
+
+    def test_get_protocol_no_match_pattern_form(self) -> None:
+        # A quoted wildcard that matches nothing -> 8003 -> None.
+        client = make_client_with_responses([b"8003 No protocols match\n"])
+        assert client.get_protocol("zzz_*") is None
+
+    def test_other_errors_still_raise(self) -> None:
+        client = make_client_with_responses([b"8002 something else\n"])
+        with pytest.raises(BirdCommandError):
+            client.show_protocols(pattern="bgp*")

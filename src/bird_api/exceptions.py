@@ -49,6 +49,27 @@ class BirdCommandError(BirdError):
         self.command = command
 
 
+class BirdValidationError(BirdError, ValueError):
+    """Raised when caller-supplied input fails safety/type validation.
+
+    This is the library's primary defence against **command injection**.
+    BIRD's control protocol is line-oriented: every ``\\n``-terminated line
+    is executed as an independent command, so any user-controlled string
+    containing a newline (or other control character) could smuggle extra
+    commands onto the wire. :mod:`bird_api.validation` therefore checks
+    every value that is interpolated into a command *before* anything is
+    sent, and raises this exception when the check fails.
+
+    It also inherits from :class:`ValueError` so generic input-validation
+    handlers keep working.
+    """
+
+    def __init__(self, message: str, *, field: str | None = None, value: object = None) -> None:
+        super().__init__(message)
+        self.field = field
+        self.value = value
+
+
 class BirdTimeoutError(BirdError):
     """Raised when a command does not complete within the configured deadline."""
 

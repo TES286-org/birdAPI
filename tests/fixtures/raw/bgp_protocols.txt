@@ -1,0 +1,5 @@
+2002-Name       Proto      Table      State  Since         Info
+1002-device1    Device     ---        up     04:17:39.339  
+ stat_a     Static     master4    up     04:17:39.339  
+ peer_b     BGP        ---        up     04:17:44.065  Established   
+0000 

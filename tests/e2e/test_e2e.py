@@ -321,10 +321,10 @@ class TestEnableDisable:
     def test_disable_no_match_raises(self, client: BirdClient) -> None:
         # On BIRD 3.x, an unknown unquoted identifier is a SYNTAX error
         # (9001) rather than a runtime "no protocols match" (8003). To
-        # trigger the runtime 8003, we need a quoted pattern that the
-        # parser accepts but matches no protocols at runtime.
+        # trigger the runtime 8003, we pass a wildcard pattern; the client
+        # quotes it automatically (a bare identifier would be a syntax error).
         with pytest.raises(BirdCommandError) as exc_info:
-            client.disable('"zzz_nonexistent_pattern"')
+            client.disable("zzz_nonexistent_*")
         # 8003 = No protocols match (runtime, not syntax).
         assert exc_info.value.code == 8003
 
@@ -368,7 +368,11 @@ class TestConnectionEdgeCases:
 
     def test_command_too_long_raises(self, client: BirdClient) -> None:
         long_cmd = "x" * 5000
-        with pytest.raises(BirdCommandError, match="Command too long"):
+        # The validation layer rejects oversized commands before the wire —
+        # BirdValidationError (which is also a BirdError/ValueError).
+        from bird_api.exceptions import BirdValidationError
+
+        with pytest.raises(BirdValidationError, match="4094"):
             client.raw(long_cmd)
 
 

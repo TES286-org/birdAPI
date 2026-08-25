@@ -1,0 +1,19 @@
+2002-Name       Proto      Table      State  Since         Info
+1002-static_test Static     master4    up     04:14:29.716  
+1006-  Created:            04:14:29.716
+   Channel ipv4
+     State:          UP
+     Import state:   UP
+     Export state:   DOWN
+     Table:          master4
+     Preference:     200
+     Input filter:   ACCEPT
+     Output filter:  REJECT
+     Routes:         3 imported, 0 exported, 3 preferred
+     Route change stats:     received   rejected   filtered    ignored   RX limit      limit   accepted
+       Import updates:              3          0          0          0          0          0          3
+       Import withdraws:            0          0        ---          0        ---        ---          0
+       Export updates:              0          0          0          0        ---          0          0
+       Export withdraws:            0        ---        ---          0        ---        ---          0
+ 
+0000 

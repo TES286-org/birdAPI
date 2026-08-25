@@ -45,10 +45,13 @@ __all__ = ["parse_route"]
 # on the 2+ space boundary between prefix and dest-name.
 _ROUTE_LINE_RE = re.compile(
     r"^(?P<prefix>\S+)\s{2,}(?P<dest>\S+)\s+"
-    r"\[(?P<proto>\S+)\s+(?P<ts>[^\]]+)\]\s+"
-    r"(?P<primary>[*!])\s+"
-    r"\((?P<pref>\d+)\)\s*$",
+    r"\[(?P<proto>\S+)\s+(?P<ts>\S+)(?:\s+from\s+(?P<from>\S+))?\]\s*"
+    r"(?:(?P<marker>[*!])\s+)?"
+    r"(?P<info>\(.*\).*)?$",
 )
+
+# Preference extracted from the info tail: leading "(<digits>...".
+_PREFERENCE_RE = re.compile(r"^\((\d+)")
 
 # Continuation line: "\tvia <gw> on <iface> [onlink] [weight N] [mpls ...]"
 _VIA_RE = re.compile(r"^via\s+(.+)$")
@@ -87,6 +90,10 @@ class _EntryBuilder:
     attribute_lines: list[str] = field(default_factory=list)
     internal_handling: str | None = None
     raw_lines: list[str] = field(default_factory=list)
+    from_ip: str | None = None
+    sync_error: bool = False
+    preference: int | None = None
+    info: str = ""
 
     def build(self) -> RouteEntry:
         return RouteEntry(
@@ -99,6 +106,10 @@ class _EntryBuilder:
             dev=list(self.dev),
             attribute_lines=list(self.attribute_lines),
             raw_lines=list(self.raw_lines),
+            from_ip=self.from_ip,
+            sync_error=self.sync_error,
+            preference=self.preference,
+            info=self.info,
         )
 
 
@@ -151,12 +162,19 @@ def parse_route(result: CommandResult) -> RouteResult:
                 if m_route:
                     if current is not None:
                         builders.append(current)
+                    info = m_route.group("info") or ""
+                    m_pref = _PREFERENCE_RE.match(info)
+                    marker = m_route.group("marker")
                     current = _EntryBuilder(
                         prefix=m_route.group("prefix"),
                         destination=m_route.group("dest"),
                         protocol=m_route.group("proto"),
                         timestamp=m_route.group("ts"),
-                        primary=(m_route.group("primary") == "*"),
+                        primary=(marker == "*"),
+                        from_ip=m_route.group("from"),
+                        sync_error=(marker == "!"),
+                        preference=int(m_pref.group(1)) if m_pref else None,
+                        info=info,
                     )
                     current.raw_lines.append(text)
                     continue

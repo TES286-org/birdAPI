@@ -21,14 +21,22 @@ import contextlib
 import errno
 import logging
 import os
+import re
 import select
 import socket
 import time
 from collections.abc import Callable
 from typing import Final
 
-from .exceptions import BirdCommandError, BirdConnectionError, BirdProtocolError, BirdTimeoutError
+from .exceptions import (
+    BirdCommandError,
+    BirdConnectionError,
+    BirdProtocolError,
+    BirdTimeoutError,
+    BirdValidationError,
+)
 from .protocol import CommandResult, ReplyLine, assemble_result, parse_line
+from .validation import validate_command_line
 
 __all__ = ["BirdConnection", "DEFAULT_SOCKET_PATH", "DEFAULT_TIMEOUT"]
 
@@ -45,6 +53,19 @@ DEFAULT_TIMEOUT: float = 30.0
 # We tolerate a slightly older/newer version string but we do drain it
 # before issuing any commands.
 _BANNER_CODE: Final[int] = 1
+
+# Read-only command allowlist for connections created with ``read_only=True``.
+# Only inspection commands pass; anything that mutates daemon state
+# (configure / enable / disable / restart / reload / dump / down / …) or
+# session state is rejected client-side, before a single byte is written to
+# the socket. This is deliberately conservative: ``eval`` and ``echo`` are
+# excluded too (they are not needed for monitoring and ``eval`` can burn
+# daemon CPU on pathological expressions). ``configure status`` is
+# read-only introspection, and ``restrict`` only ever *tightens* the
+# session's own permissions, so both are allowed.
+_READ_ONLY_COMMAND_RE: Final[re.Pattern[str]] = re.compile(
+    r"\A(?:show\b|configure\s+status\b|restrict\b)",
+)
 
 
 AsyncCallback = Callable[[str], None]
@@ -71,6 +92,12 @@ class BirdConnection:
         Optional callback invoked once for every ``+``-prefixed async
         message. The argument is the message text (without the leading ``+``).
         If the callback raises, the exception propagates out of ``execute``.
+    read_only:
+        When ``True``, only inspection commands (``show …``,
+        ``configure status``, ``restrict``) are allowed through — everything
+        else raises :class:`BirdValidationError` before touching the socket.
+        This is a client-side allowlist; combine it with the server-side
+        ``restrict`` command for defence in depth.
 
     Example
     -------
@@ -88,10 +115,12 @@ class BirdConnection:
         socket_path: str = DEFAULT_SOCKET_PATH,
         timeout: float = DEFAULT_TIMEOUT,
         on_async: AsyncCallback | None = None,
+        read_only: bool = False,
     ) -> None:
         self._socket_path = socket_path
         self._timeout = timeout
         self._on_async = on_async
+        self._read_only = read_only
         self._sock: socket.socket | None = None
         # Receive buffer holds bytes that have not yet been split on '\n'.
         self._rx_buf = bytearray()
@@ -184,7 +213,21 @@ class BirdConnection:
             If no FINAL line arrived within the timeout window.
         BirdProtocolError
             If the bytes received do not match the wire protocol.
+        BirdValidationError
+            If ``read_only=True`` and the command is not an inspection
+            command, or the command contains control characters.
         """
+        # Injection guard: never let a newline (or any control character)
+        # onto the wire through the escape hatch.
+        validate_command_line(command)
+
+        if self._read_only and not _READ_ONLY_COMMAND_RE.match(command):
+            raise BirdValidationError(
+                f"read-only connection rejects command {command!r}",
+                field="command",
+                value=command,
+            )
+
         if len(command) > 4094:  # CLI_RX_BUF_SIZE - 2
             raise BirdCommandError(
                 9000,
@@ -363,6 +406,11 @@ class BirdConnection:
     @property
     def timeout(self) -> float:
         return self._timeout
+
+    @property
+    def read_only(self) -> bool:
+        """Whether this connection enforces the read-only command allowlist."""
+        return self._read_only
 
 
 # Re-exported for convenience at the module level (avoids one level of

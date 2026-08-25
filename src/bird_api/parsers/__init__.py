@@ -14,6 +14,7 @@ new BIRD version introduces a field the parser doesn't yet know about.
 from __future__ import annotations
 
 from .actions import parse_action
+from .bgp import parse_bgp_session_detail, parse_bgp_sessions
 from .config import parse_configure
 from .eval import parse_eval
 from .interfaces import parse_interfaces, parse_interfaces_summary
@@ -35,4 +36,6 @@ __all__ = [
     "parse_eval",
     "parse_configure",
     "parse_action",
+    "parse_bgp_sessions",
+    "parse_bgp_session_detail",
 ]

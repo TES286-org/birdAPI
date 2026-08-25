@@ -1043,3 +1043,61 @@ To implement a minimal BIRD control-socket client:
 ---
 
 *End of report.*
+
+## 7. Security Posture: Line-Framing and Command Injection
+
+### 7.1 The threat
+
+The control protocol executes **every `\n`-terminated line as an independent
+command** (§2.1, §2.9). There is no quoting or parameterisation at the protocol
+level, so any client that interpolates user-controlled strings into commands is
+injectable. Verified live against BIRD 3.1.7 — a single payload of:
+
+```
+eval 1+2\nshow status\n
+```
+
+produces **two** independent replies (`0023 3` and the `show status` output).
+The classic worst case is `show route <prefix>\ndown`, which would shut the
+daemon down.
+
+### 7.2 The defence (bird_api.validation, added in v0.2.0)
+
+| Layer | Rule | Defends against |
+|---|---|---|
+| Line safety | No C0 control characters or DEL in *any* value | newline/command injection (framing attacks) |
+| Lexical safety | Identifiers `[A-Za-z_][A-Za-z0-9_]*` ≤ 64 chars; prefixes canonicalised via `ipaddress` with host bits rejected (mirrors the daemon's own `Invalid IPv4 prefix …` error); patterns are printable ASCII without `"`; enums fixed | argument smuggling within one line |
+| Structural safety | mutual-exclusion checks; 4094-byte command cap | malformed commands, confusing errors |
+
+Free-form surfaces (`raw()`, `eval()`, `where` expressions) accept the full
+filter language but only as a single printable-ASCII line — framing cannot be
+broken, so the worst case is a daemon-side syntax error (9001), never a second
+executed command.
+
+### 7.3 Read-only mode
+
+`BirdClient(read_only=True)` (and `BirdConnection(read_only=True)`) enforce a
+client-side allowlist — `show …`, `configure status`, `restrict` — before any
+byte is written. Unlike the server-side `restrict` command (§4.7), the
+client-side check survives transparent reconnects. `eval` is deliberately
+excluded from the allowlist (it can burn daemon CPU on pathological
+expressions and is unnecessary for monitoring).
+
+### 7.4 Grammar facts verified for the query builders (v0.2.0)
+
+* Filter boolean operators are C-style: `&&`, `||`, `!` — the word forms
+  `and` / `or` / `not` are **syntax errors** on BIRD 3.1.7.
+* `proto = "name"` string comparison works in `where` clauses.
+* Protocol patterns must be double-quoted TEXT to use wildcards:
+  `show protocols "static*"` (unquoted `static*` is a syntax error);
+  `patmatch()` understands `*` and `?`.
+* `show route <prefix>` with host bits set is rejected by the daemon with
+  a helpful message; the library rejects the same inputs client-side.
+* Route lines may carry an optional marker (`*` best, `!` sync error, or
+  **absent** for non-primary routes) and BGP appends an info tail such as
+  `(100) [i]` / `(100/50) [AS65000e]` (proto/bgp/attrs.c
+  `bgp_get_route_info`); `from <ip>` appears inside the source brackets of
+  BGP-learned routes.
+* Two BIRD instances can peer over loopback without root using
+  `local <ip> port 1179 …; strict bind;` on distinct 127/8 addresses
+  (used by the e2e BGP tests).

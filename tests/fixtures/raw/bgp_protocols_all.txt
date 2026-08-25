@@ -1,0 +1,70 @@
+2002-Name       Proto      Table      State  Since         Info
+1002-device1    Device     ---        up     04:17:39.339  
+1006-  Created:            04:17:39.339
+ 
+1002-stat_a     Static     master4    up     04:17:39.339  
+1006-  Created:            04:17:39.339
+   Channel ipv4
+     State:          UP
+     Import state:   UP
+     Export state:   DOWN
+     Table:          master4
+     Preference:     200
+     Input filter:   ACCEPT
+     Output filter:  REJECT
+     Routes:         1 imported, 0 exported, 1 preferred
+     Route change stats:     received   rejected   filtered    ignored   RX limit      limit   accepted
+       Import updates:              1          0          0          0          0          0          1
+       Import withdraws:            0          0        ---          0        ---        ---          0
+       Export updates:              0          0          0          0        ---          0          0
+       Export withdraws:            0        ---        ---          0        ---        ---          0
+ 
+1002-peer_b     BGP        ---        up     04:17:44.065  Established   
+1006-  Created:            04:17:39.339
+   BGP state:          Established
+     Neighbor address: 127.0.0.3
+     Neighbor port:    1179
+     Neighbor AS:      65000
+     Local AS:         65000
+     Neighbor ID:      10.0.0.2
+     Local capabilities
+       Multiprotocol
+         AF announced: ipv4
+       Route refresh
+       Graceful restart
+       4-octet AS numbers
+       Enhanced refresh
+       Long-lived graceful restart
+     Neighbor capabilities
+       Multiprotocol
+         AF announced: ipv4
+       Route refresh
+       Graceful restart
+       4-octet AS numbers
+       Enhanced refresh
+       Long-lived graceful restart
+     Session:          internal multihop AS4
+     Source address:   127.0.0.2
+     Hold timer:       136.254/240
+     Keepalive timer:  24.161/80
+     TX pending:       0 bytes
+     Send hold timer:  399.534/480
+   Channel ipv4
+     State:          UP
+     Import state:   UP
+     Export state:   READY
+     Table:          master4
+     Preference:     100
+     Input filter:   ACCEPT
+     Output filter:  (unnamed)
+     Routes:         1 imported, 1 exported, 1 preferred
+     Route change stats:     received   rejected   filtered    ignored   RX limit      limit   accepted
+       Import updates:              1          0          0          0          0          0          1
+       Import withdraws:            0          0        ---          0        ---        ---          0
+       Export updates:              2          1          0          0        ---          0          1
+       Export withdraws:            0        ---        ---          0        ---        ---          0
+     BGP Next hop:   127.0.0.2
+     IGP IPv4 table: master4
+     Pending 0 attribute sets with total 0 prefixes to send
+ 
+0000 

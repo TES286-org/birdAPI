@@ -12,13 +12,18 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from pathlib import Path
 
-from bird_api.exceptions import BirdCommandError, BirdConnectionError
+from bird_api.exceptions import BirdCommandError, BirdConnectionError, BirdValidationError
 from bird_api.protocol import CommandResult, assemble_result, parse_line
+from bird_api.validation import validate_command_line
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "raw"
+
+# Mirror of connection._READ_ONLY_COMMAND_RE.
+_FAKE_READ_ONLY_RE = re.compile(r"\A(?:show\b|configure\s+status\b|restrict\b)")
 
 
 def load_fixture(name: str) -> bytes:
@@ -72,6 +77,11 @@ class FakeBirdConnection:
     parses it. If the canned response includes a banner line (code
     ``0001``), it is consumed automatically on the first call to
     :meth:`connect`.
+
+    It mirrors the real connection's safety semantics: command-length
+    limit, single-line/control-character validation, the read-only
+    allowlist, lazy-connect on first call, and raising ``BirdCommandError``
+    when the canned response's final code is >= 8000.
     """
 
     def __init__(self, *, responses: Iterable[bytes], banner: bytes | None = None) -> None:
@@ -82,6 +92,7 @@ class FakeBirdConnection:
         self.server_version: str | None = None
         self.socket_path = "<fake>"
         self.timeout = 30.0
+        self.read_only = False
 
     def connect(self) -> None:
         # Drain the banner.
@@ -118,6 +129,13 @@ class FakeBirdConnection:
                 9000,
                 f"Command too long ({len(command)} bytes, max 4094)",
                 command=command,
+            )
+        validate_command_line(command)
+        if self.read_only and not _FAKE_READ_ONLY_RE.match(command):
+            raise BirdValidationError(
+                f"read-only connection rejects command {command!r}",
+                field="command",
+                value=command,
             )
         if not self.is_connected:
             self.connect()

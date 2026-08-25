@@ -1,0 +1,4 @@
+2002-Name       Proto      Table      State  Since         Info
+1002-static_test Static     master4    up     04:14:29.716  
+ static_test2 Static     master4    up     04:14:29.716  
+0000 

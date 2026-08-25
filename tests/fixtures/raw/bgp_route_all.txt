@@ -1,0 +1,17 @@
+1007-Table master4:
+ 192.0.2.0/24         blackhole [stat_a 04:17:39.339] * (200)
+1012-	preference: 200
+ 	source: static
+1008-	Internal route handling values: 0L 2G 0S id 1
+1007-198.51.100.0/24      unreachable [peer_b 04:17:44.066 from 127.0.0.3] * (100) [i]
+1012-	hostentry: via 127.0.0.3 table master4
+ 	preference: 100
+ 	igp_metric: 0
+ 	from: 127.0.0.3
+ 	source: BGP
+ 	bgp_origin: IGP
+ 	bgp_path: 
+ 	bgp_next_hop: 127.0.0.3
+ 	bgp_local_pref: 100
+1008-	Internal route handling values: 0L 3G 0S id 2
+0000 

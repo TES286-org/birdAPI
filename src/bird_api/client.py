@@ -4,9 +4,12 @@ A :class:`BirdClient` owns a :class:`~bird_api.connection.BirdConnection`
 (persistent Unix socket) and exposes one method per supported BIRD command
 family. Each method:
 
-1. Builds the wire command string (with optional arguments).
-2. Calls :meth:`BirdConnection.execute` to send it and collect the response.
-3. Dispatches the response to the matching parser, which returns a typed
+1. **Validates** every caller-supplied argument through
+   :mod:`bird_api.validation` (this is the injection-prevention layer —
+   see that module's docstring for the threat model).
+2. Builds the wire command string (with optional arguments).
+3. Calls :meth:`BirdConnection.execute` to send it and collect the response.
+4. Dispatches the response to the matching parser, which returns a typed
    :class:`~bird_api.models.ParsedResponse` carrying both structured fields
    and the original raw text.
 
@@ -15,16 +18,25 @@ all subsequent commands until :meth:`close` is called. If the underlying
 socket dies (e.g. the daemon was restarted), the next command triggers a
 transparent reconnect.
 
+Complex queries
+---------------
+For everything the one-shot methods cannot express, use
+:class:`~bird_api.queries.RouteQuery` (the full ``show route`` grammar) and
+:class:`~bird_api.queries.RouteFilter` (a validated filter algebra), or the
+higher-level convenience wrappers (:meth:`route_lookup`, :meth:`route_exists`,
+:meth:`count_routes`, :meth:`bgp_sessions`, :meth:`get_protocol`).
+
 Example
 -------
-    >>> from bird_api import BirdClient
+    >>> from bird_api import BirdClient, RouteFilter, RouteQuery
     >>> with BirdClient(socket_path="/tmp/bird.ctl") as client:
     ...     status = client.show_status()
     ...     print(status.router_id, status.bird_version)
-    ...     for row in client.show_protocols().rows:
+    ...     for row in client.show_protocols(pattern="static*").rows:
     ...         print(row.name, row.state)
-    ...     for entry in client.show_route().entries:
-    ...         print(entry.prefix, entry.protocol)
+    ...     q = RouteQuery().table("master4").where(RouteFilter.protocol("static_test"))
+    ...     for entry in client.show_route_query(q).entries:
+    ...         print(entry.prefix, entry.preference)
 """
 
 from __future__ import annotations
@@ -33,13 +45,16 @@ from collections.abc import Iterator
 from typing import Any
 
 from .connection import DEFAULT_SOCKET_PATH, DEFAULT_TIMEOUT, AsyncCallback, BirdConnection
+from .exceptions import BirdCommandError
 from .models import (
     ActionResult,
+    BgpSessionsResult,
     ConfigResult,
     EvalResult,
     InterfacesResult,
     InterfacesSummaryResult,
     MemoryInfo,
+    ProtocolDetail,
     ProtocolsAllResult,
     ProtocolsResult,
     RouteResult,
@@ -48,6 +63,7 @@ from .models import (
 )
 from .parsers import (
     parse_action,
+    parse_bgp_sessions,
     parse_configure,
     parse_eval,
     parse_interfaces,
@@ -60,6 +76,18 @@ from .parsers import (
     parse_symbols,
 )
 from .protocol import CommandResult
+from .queries import RouteQuery
+from .validation import (
+    format_pattern,
+    validate_address,
+    validate_choice,
+    validate_filter_expression,
+    validate_identifier,
+    validate_path,
+    validate_pattern,
+    validate_positive_int,
+    validate_prefix,
+)
 
 __all__ = ["BirdClient", "DEFAULT_SOCKET_PATH", "DEFAULT_TIMEOUT"]
 
@@ -76,6 +104,14 @@ class BirdClient:
     on_async:
         Optional callback for unsolicited ``+``-prefixed messages (see
         :class:`~bird_api.connection.BirdConnection` for details).
+    read_only:
+        When ``True``, the client refuses to send any command that mutates
+        daemon state (``configure``, ``enable``, ``disable``, ``restart``,
+        ``reload``, ``dump``, ``down``, …) — including via :meth:`raw`.
+        The check happens client-side, before anything is written to the
+        socket, and survives transparent reconnects (unlike the server-side
+        ``restrict`` command, which is per-session). Combine both for
+        defence in depth.
     """
 
     def __init__(
@@ -84,11 +120,13 @@ class BirdClient:
         socket_path: str = DEFAULT_SOCKET_PATH,
         timeout: float = DEFAULT_TIMEOUT,
         on_async: AsyncCallback | None = None,
+        read_only: bool = False,
     ) -> None:
         self._conn = BirdConnection(
             socket_path=socket_path,
             timeout=timeout,
             on_async=on_async,
+            read_only=read_only,
         )
 
     # ------------------------------------------------------------------
@@ -125,15 +163,64 @@ class BirdClient:
         result = self._conn.execute("show memory")
         return parse_memory(result)
 
-    def show_protocols(self) -> ProtocolsResult:
-        """``show protocols`` — one-line summary per configured protocol."""
-        result = self._conn.execute("show protocols")
+    def show_protocols(self, *, pattern: str | None = None) -> ProtocolsResult:
+        """``show protocols [<pattern>]`` — one-line summary per protocol.
+
+        Parameters
+        ----------
+        pattern:
+            Optional protocol name or shell-like pattern (``bgp*``, ``ospf?``).
+            Bare identifiers and ``"all"`` are sent unquoted; anything else
+            is double-quoted, which is how BIRD's grammar accepts patterns.
+        """
+        cmd = "show protocols"
+        if pattern is not None:
+            cmd += " " + format_pattern(pattern, field="pattern")
+        try:
+            result = self._conn.execute(cmd)
+        except BirdCommandError as exc:
+            # 8003 "No protocols match" is a legitimate empty answer to a
+            # pattern query, not a failure.
+            if exc.code == 8003:
+                return ProtocolsResult(raw_text=exc.message or "", command=cmd, rows=[])
+            raise
         return parse_protocols(result)
 
-    def show_protocols_all(self) -> ProtocolsAllResult:
-        """``show protocols all`` — full per-protocol verbose block."""
-        result = self._conn.execute("show protocols all")
+    def show_protocols_all(self, *, pattern: str | None = None) -> ProtocolsAllResult:
+        """``show protocols all [<pattern>]`` — full per-protocol verbose block."""
+        cmd = "show protocols all"
+        if pattern is not None:
+            cmd += " " + format_pattern(pattern, field="pattern")
+        try:
+            result = self._conn.execute(cmd)
+        except BirdCommandError as exc:
+            if exc.code == 8003:
+                return ProtocolsAllResult(raw_text=exc.message or "", command=cmd, rows=[], details=[])
+            raise
         return parse_protocols_all(result)
+
+    def get_protocol(self, name: str) -> ProtocolDetail | None:
+        """Fetch one protocol's verbose detail block by exact name.
+
+        Returns ``None`` when no protocol with that name exists (the daemon
+        answers a syntax error for unknown symbols, which we translate into
+        a clean miss). Prefer :meth:`show_protocols_all` with a pattern for
+        fuzzy matching.
+        """
+        wire = format_pattern(name, field="protocol name")
+        try:
+            result = self._conn.execute(f"show protocols all {wire}")
+        except BirdCommandError as exc:
+            # Unknown symbol is reported as a parse error (9001) by BIRD, and
+            # a non-matching pattern as 8003; treat both as "not found".
+            if exc.code in (8003, 9001):
+                return None
+            raise
+        parsed = parse_protocols_all(result)
+        for detail in parsed.details:
+            if detail.name == name:
+                return detail
+        return None
 
     def show_route(self, *, all: bool = False) -> RouteResult:
         """``show route [all]`` — all routes from the default table.
@@ -144,32 +231,50 @@ class BirdClient:
         result = self._conn.execute(cmd)
         return parse_route(result)
 
+    def show_route_query(self, query: RouteQuery) -> RouteResult:
+        """Execute a :class:`~bird_api.queries.RouteQuery` (full ``show route`` grammar).
+
+        The query is validated at build time by the builder itself; this
+        method merely assembles, sends, and parses::
+
+            client.show_route_query(
+                RouteQuery().table("master4").protocol("bgp1").all_details()
+            )
+        """
+        result = self._conn.execute(query.build())
+        return parse_route(result)
+
     def show_route_prefix(self, prefix: str, *, all: bool = False) -> RouteResult:
         """``show route <prefix> [all]`` — routes for a specific network."""
+        prefix = validate_prefix(prefix, field="prefix")
         cmd = f"show route {prefix}" + (" all" if all else "")
         result = self._conn.execute(cmd)
         return parse_route(result)
 
     def show_route_for(self, address: str, *, all: bool = False) -> RouteResult:
         """``show route for <ip> [all]`` — routes that would be used to reach <address>."""
+        address = validate_address(address, field="address")
         cmd = f"show route for {address}" + (" all" if all else "")
         result = self._conn.execute(cmd)
         return parse_route(result)
 
     def show_route_in(self, prefix: str, *, all: bool = False) -> RouteResult:
         """``show route in <prefix> [all]`` — routes contained within <prefix>."""
+        prefix = validate_prefix(prefix, field="prefix")
         cmd = f"show route in {prefix}" + (" all" if all else "")
         result = self._conn.execute(cmd)
         return parse_route(result)
 
     def show_route_table(self, table: str, *, all: bool = False) -> RouteResult:
         """``show route table <name> [all]`` — routes from a named table."""
+        table = validate_identifier(table, field="table name")
         cmd = f"show route table {table}" + (" all" if all else "")
         result = self._conn.execute(cmd)
         return parse_route(result)
 
     def show_route_protocol(self, protocol: str, *, all: bool = False) -> RouteResult:
         """``show route protocol <name> [all]`` — routes learned from a specific protocol."""
+        protocol = validate_identifier(protocol, field="protocol name")
         cmd = f"show route protocol {protocol}" + (" all" if all else "")
         result = self._conn.execute(cmd)
         return parse_route(result)
@@ -201,9 +306,121 @@ class BirdClient:
         Use ``eval("1+2")`` to compute arithmetic; pass a quoted filter
         expression to evaluate complex filters. The daemon's response
         text becomes ``EvalResult.value``.
+
+        The expression is validated to be a single line of printable
+        ASCII — this preserves wire framing (no command injection) while
+        allowing the full filter language.
         """
+        expr = validate_filter_expression(expr, field="expression")
         result = self._conn.execute(f"eval {expr}")
         return parse_eval(result)
+
+    # ------------------------------------------------------------------
+    # High-level complex-query wrappers
+    # ------------------------------------------------------------------
+
+    def route_lookup(
+        self,
+        address: str,
+        *,
+        table: str | None = None,
+        all: bool = False,
+    ) -> RouteResult:
+        """Best-route lookup for one address — ``show route for <ip>``.
+
+        Unlike :meth:`show_route_for`, a lookup miss is not an error: BIRD's
+        ``8001 Network not found`` is translated into an empty
+        :class:`~bird_api.models.RouteResult` (``entries == []``), because
+        "no route" is a legitimate answer to a lookup. The raw text always
+        reflects exactly what the daemon sent.
+        """
+        query = RouteQuery().for_address(address)
+        if table is not None:
+            query = query.table(table)
+        if all:
+            query = query.all_details()
+        try:
+            result = self._conn.execute(query.build())
+        except BirdCommandError as exc:
+            if exc.code == 8001:  # "Network not found"
+                return RouteResult(
+                    raw_text=exc.message or "Network not found",
+                    command=exc.command or query.build(),
+                    table=table or "",
+                    entries=[],
+                    stats={},
+                )
+            raise
+        return parse_route(result)
+
+    def route_exists(self, prefix: str, *, table: str | None = None) -> bool:
+        """``True`` if the exact prefix exists in the routing table."""
+        query = RouteQuery().prefix(prefix)
+        if table is not None:
+            query = query.table(table)
+        try:
+            self._conn.execute(query.build())
+        except BirdCommandError as exc:
+            if exc.code == 8001:
+                return False
+            raise
+        return True
+
+    def count_routes(self, *, table: str | None = None) -> int:
+        """Number of routes in one table (or the grand total across all tables).
+
+        Uses ``show route count`` (no route lines are transferred — the
+        daemon only reports the counters, which matters on tables with
+        millions of routes).
+        """
+        query = RouteQuery().count().table(table) if table is not None else RouteQuery().count().table_all()
+        result = parse_route(self._conn.execute(query.build()))
+        if table is not None:
+            value = result.stats.get(f"{table}.routes")
+            if value is None:
+                raise ValueError(  # noqa: TRY003 - simple guard, message is short
+                    f"no route count reported for table {table!r}"
+                )
+            return int(value)
+        value = result.stats.get("routes")
+        if value is None:
+            # No "Total:" line means zero routes everywhere.
+            return 0
+        return int(value)
+
+    def bgp_sessions(self, *, pattern: str | None = None) -> BgpSessionsResult:
+        """Structured BGP session overview — ``show protocols all [<pattern>]``.
+
+        Filters the protocol list to BGP and decodes each session's detail
+        block (state, neighbor address/AS/ID, timers, session type, …).
+        Pass ``pattern="peer_*"`` to restrict the set.
+        """
+        cmd = "show protocols all"
+        if pattern is not None:
+            cmd += " " + format_pattern(pattern, field="pattern")
+        try:
+            result = self._conn.execute(cmd)
+        except BirdCommandError as exc:
+            if exc.code == 8003:
+                return BgpSessionsResult(raw_text=exc.message or "", command=cmd, sessions=[])
+            raise
+        parsed = parse_protocols_all(result)
+        return parse_bgp_sessions(parsed.details, raw_text=parsed.raw_text, command=cmd)
+
+    def find_protocols(self, pattern: str) -> ProtocolsResult:
+        """``show protocols <pattern>`` — shell-like pattern matching.
+
+        Example patterns: ``"bgp*"`` (all BGP), ``"ospf?"``, ``"static*"``.
+        """
+        pattern = validate_pattern(pattern, field="pattern")
+        cmd = f"show protocols {format_pattern(pattern, field='pattern')}"
+        try:
+            result = self._conn.execute(cmd)
+        except BirdCommandError as exc:
+            if exc.code == 8003:
+                return ProtocolsResult(raw_text=exc.message or "", command=cmd, rows=[])
+            raise
+        return parse_protocols(result)
 
     # ------------------------------------------------------------------
     # Configuration commands
@@ -223,7 +440,8 @@ class BirdClient:
         ----------
         file:
             Path to the configuration file. The wire command will quote
-            this with double quotes per BIRD's lexer rules.
+            this with double quotes per BIRD's lexer rules; the path must
+            therefore be printable ASCII without double quotes.
         timeout:
             If given, schedules an automatic undo after this many seconds;
             the daemon will revert to the previous config unless
@@ -236,14 +454,14 @@ class BirdClient:
         """
         # Per BIRD's lexer, the file path MUST be a double-quoted string.
         # Internal double quotes inside the path are not supported by BIRD;
-        # we don't try to escape them.
-        quoted = f'"{file}"'
+        # validate_path rejects them so we never emit a malformed command.
+        quoted = f'"{validate_path(file, field="config file path")}"'
         if check:
             cmd = f"configure check {quoted}"
         else:
             soft_kw = "soft " if soft else ""
             if timeout is not None:
-                cmd = f"configure {soft_kw}{quoted} timeout {timeout}"
+                cmd = f"configure {soft_kw}{quoted} timeout {validate_positive_int(timeout, field='timeout')}"
             else:
                 cmd = f"configure {soft_kw}{quoted}"
         result = self._conn.execute(cmd)
@@ -270,17 +488,20 @@ class BirdClient:
 
     def enable(self, pattern: str = "all") -> ActionResult:
         """``enable <pattern>`` — enable matching protocols."""
-        result = self._conn.execute(f"enable {pattern}")
+        wire = format_pattern(pattern, field="pattern")
+        result = self._conn.execute(f"enable {wire}")
         return parse_action(result)
 
     def disable(self, pattern: str = "all") -> ActionResult:
         """``disable <pattern>`` — disable matching protocols."""
-        result = self._conn.execute(f"disable {pattern}")
+        wire = format_pattern(pattern, field="pattern")
+        result = self._conn.execute(f"disable {wire}")
         return parse_action(result)
 
     def restart(self, pattern: str = "all") -> ActionResult:
         """``restart <pattern>`` — restart matching protocols."""
-        result = self._conn.execute(f"restart {pattern}")
+        wire = format_pattern(pattern, field="pattern")
+        result = self._conn.execute(f"restart {wire}")
         return parse_action(result)
 
     def reload(self, pattern: str = "all", *, direction: str = "both") -> ActionResult:
@@ -291,9 +512,9 @@ class BirdClient:
         may fail on BIRD 3.x; use ``direction="in"`` or ``direction="out"``
         for compatibility with BIRD 3.x.
         """
-        if direction not in ("both", "in", "out"):
-            raise ValueError(f"direction must be 'both', 'in', or 'out', got {direction!r}")
-        cmd = f"reload {pattern}" if direction == "both" else f"reload {direction} {pattern}"
+        direction = validate_choice(direction, ("both", "in", "out"), field="direction")
+        wire = format_pattern(pattern, field="pattern")
+        cmd = f"reload {wire}" if direction == "both" else f"reload {direction} {wire}"
         result = self._conn.execute(cmd)
         return parse_action(result)
 
@@ -308,11 +529,9 @@ class BirdClient:
             "resources", "sockets", "ao keys", "events", "interfaces",
             "neighbors", "attributes", "routes", "protocols", "filter all",
         }
-        if kind not in valid:
-            raise ValueError(
-                f"invalid dump kind {kind!r}; must be one of {sorted(valid)!r}",
-            )
-        cmd = f'dump {kind} "{file}"'
+        kind = validate_choice(kind, valid, field="dump kind")
+        path = validate_path(file, field="dump file path")
+        cmd = f'dump {kind} "{path}"'
         result = self._conn.execute(cmd)
         return parse_action(result)
 
@@ -325,6 +544,10 @@ class BirdClient:
 
         Subsequent privileged commands (configure, enable, disable,
         restart, dump, etc.) will fail with code 8007 (Access denied).
+        Note: this is server-side and per-session — if the connection is
+        re-established (e.g. after a daemon restart) the restriction is
+        gone. Use ``BirdClient(read_only=True)`` for a reconnect-safe
+        client-side allowlist.
         """
         # `restrict` always returns code 0016 (which is < 8000, so it is
         # treated as success by the connection layer).
@@ -357,6 +580,11 @@ class BirdClient:
         ``.raw_text``, ``.async_messages``, ``.final_code``, ``.success``,
         ``.error_message``) for the caller to parse manually.
 
+        Security: the command must be a single line without control
+        characters (a newline would let a second command ride the same
+        frame — the classic injection vector), and it is rejected entirely
+        when the client was constructed with ``read_only=True``.
+
         Raises :class:`~bird_api.exceptions.BirdCommandError` if the daemon
         reports a runtime/parse error.
         """
@@ -366,6 +594,8 @@ class BirdClient:
         """Like :meth:`raw` but yields only the per-line text (no protocol prefix).
 
         Useful for ad-hoc streaming-style inspection of new commands.
+        Subject to the same single-line / read-only restrictions as
+        :meth:`raw`.
         """
         result = self._conn.execute(command)
         yield from result.raw_lines
@@ -388,6 +618,11 @@ class BirdClient:
     def socket_path(self) -> str:
         """The configured socket path."""
         return self._conn.socket_path
+
+    @property
+    def read_only(self) -> bool:
+        """Whether this client enforces the read-only command allowlist."""
+        return self._conn.read_only
 
     def __repr__(self) -> str:  # pragma: no cover - cosmetic
         return (

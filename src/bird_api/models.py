@@ -39,6 +39,8 @@ __all__ = [
     "EvalResult",
     "ConfigResult",
     "ActionResult",
+    "BgpSession",
+    "BgpSessionsResult",
 ]
 
 
@@ -171,17 +173,55 @@ class RouteEntry:
     A "route entry" is one prefix row plus any ``via``/``dev`` continuation
     lines that belong to it (nexthops). For ``show route all`` the attribute
     block (code 1012) is captured in ``attribute_lines``.
+
+    BIRD's route line is::
+
+        <prefix> <dest> [<proto> <time>[ from <ip>]][ *|!][ (<pref>)[<extra>]]
+
+    so non-primary routes carry no ``*``/``!`` marker at all, and BGP routes
+    append protocol-specific info after the preference (e.g. ``(100) [i]``).
     """
 
     prefix: str
-    destination: str  # BIRD's dest-name, often "---"
+    destination: str  # BIRD's dest-name: "unicast", "blackhole", "unreachable", ...
     protocol: str
     timestamp: str
-    primary: bool  # True if marked with '*' (primary route); False if '!' (sync error)
+    primary: bool  # True if marked with '*' (best route in its network)
     via: list[str]  # each "via <gw> on <iface>" line
     dev: list[str]  # each "dev <iface>" line
     attribute_lines: list[str]  # code 1012 lines for ``show route all``
     raw_lines: list[str]  # original lines for round-trip inspection
+    from_ip: str | None = None  # "from <ip>" inside the source brackets (BGP)
+    sync_error: bool = False  # True if marked with '!' (kernel sync error)
+    preference: int | None = None  # parsed from the trailing "(<n>)" info
+    info: str = ""  # the raw info tail, e.g. "(100) [i]" for BGP routes
+
+    @property
+    def attributes(self) -> dict[str, str]:
+        """The ``show route all`` attribute block as a ``key -> value`` dict.
+
+        Lines without a ``: `` separator are treated as continuations of the
+        previous attribute's value (BIRD wraps long lists such as large
+        community sets). Values are kept as raw strings; typed views can be
+        built on top by the caller.
+        """
+        result: dict[str, str] = {}
+        last_key: str | None = None
+        for line in self.attribute_lines:
+            if ": " in line:
+                key, _, value = line.partition(": ")
+                key = key.strip()
+                result[key] = value.strip()
+                last_key = key
+            elif line.endswith(":"):
+                key = line[:-1].strip()
+                result[key] = ""
+                last_key = key
+            elif last_key is not None:
+                result[last_key] = (result[last_key] + " " + line.strip()).strip()
+            # A leading line with no colon and no prior key is ignored
+            # (defensive — never produced by BIRD).
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -340,3 +380,48 @@ class ActionResult(ParsedResponse):
     command: str
     per_target: list[str]  # e.g. ["direct1: disabled", "kernel1: already disabled"]
     message: str  # final line text
+
+
+# ---------------------------------------------------------------------------
+# BGP sessions (parsed from `show protocols all` detail blocks)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class BgpSession:
+    """Structured view of one BGP protocol's ``show protocols all`` detail block.
+
+    Fields mirror the lines emitted by ``bgp_show_proto_info()``
+    (proto/bgp/bgp.c). Anything the parser does not model explicitly is
+    preserved in ``extra_lines``.
+    """
+
+    name: str  # protocol name (e.g. "peer_b")
+    state: str  # BGP state, e.g. "Established", "Idle", "Active"
+    neighbor_address: str | None
+    neighbor_port: int | None
+    neighbor_as: int | None
+    local_as: int | None
+    neighbor_id: str | None
+    session: str | None  # e.g. "internal multihop AS4"
+    source_address: str | None
+    hold_timer: str | None  # raw "175.586/240"
+    keepalive_timer: str | None  # raw "63.888/80"
+    send_hold_timer: str | None
+    last_error: str | None
+    capabilities: list[str]  # local + neighbor capability lines
+    extra_lines: list[str]  # anything else, verbatim
+
+    @property
+    def established(self) -> bool:
+        """``True`` when the session state is ``Established``."""
+        return self.state == "Established"
+
+
+@dataclass(frozen=True, slots=True)
+class BgpSessionsResult(ParsedResponse):
+    """Decoded BGP-session view of a ``show protocols all`` response."""
+
+    raw_text: str
+    command: str
+    sessions: list[BgpSession]

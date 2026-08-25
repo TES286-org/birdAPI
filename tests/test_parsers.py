@@ -11,8 +11,10 @@ from __future__ import annotations
 
 from conftest import load_fixture_result, make_result_from_text
 
+from bird_api.models import RouteEntry
 from bird_api.parsers import (
     parse_action,
+    parse_bgp_sessions,
     parse_configure,
     parse_eval,
     parse_interfaces,
@@ -373,3 +375,153 @@ class TestActionParser:
         result = make_result_from_text(text, command="disable nonexistent")
         assert not result.success
         assert result.error_message == "No protocols match"
+
+
+# ---------------------------------------------------------------------------
+# BGP session parsing (show protocols all on a BGP daemon)
+# ---------------------------------------------------------------------------
+
+
+class TestBgpSessions:
+    def test_parse_established_session(self) -> None:
+        result = load_fixture_result("bgp_protocols_all", command="show protocols all")
+        parsed = parse_protocols_all(result)
+        sessions = parse_bgp_sessions(parsed.details, raw_text=result.raw_text, command="show protocols all")
+
+        assert len(sessions.sessions) == 1
+        s = sessions.sessions[0]
+        assert s.name == "peer_b"
+        assert s.state == "Established"
+        assert s.established
+        assert s.neighbor_address == "127.0.0.3"
+        assert s.neighbor_port == 1179
+        assert s.neighbor_as == 65000
+        assert s.local_as == 65000
+        assert s.neighbor_id == "10.0.0.2"
+        assert s.session == "internal multihop AS4"
+        assert s.source_address == "127.0.0.2"
+        assert s.hold_timer is not None and "/" in s.hold_timer
+        assert s.keepalive_timer is not None and "/" in s.keepalive_timer
+        assert s.send_hold_timer is not None
+
+    def test_capabilities_collected(self) -> None:
+        result = load_fixture_result("bgp_protocols_all", command="show protocols all")
+        parsed = parse_protocols_all(result)
+        sessions = parse_bgp_sessions(parsed.details, raw_text=result.raw_text, command="show protocols all")
+        caps = sessions.sessions[0].capabilities
+        assert "Local capabilities" in caps
+        assert "Neighbor capabilities" in caps
+        assert any("Multiprotocol" in c for c in caps)
+        assert any("AF announced: ipv4" in c for c in caps)
+        assert any("4-octet AS numbers" in c for c in caps)
+
+    def test_non_bgp_daemon_yields_empty(self) -> None:
+        result = load_fixture_result("show_protocols_all", command="show protocols all")
+        parsed = parse_protocols_all(result)
+        sessions = parse_bgp_sessions(parsed.details, raw_text=result.raw_text, command="show protocols all")
+        assert sessions.sessions == []
+
+    def test_raw_text_preserved(self) -> None:
+        result = load_fixture_result("bgp_protocols_all", command="show protocols all")
+        parsed = parse_protocols_all(result)
+        sessions = parse_bgp_sessions(parsed.details, raw_text=result.raw_text, command="show protocols all")
+        assert "Established" in sessions.raw_text
+        assert sessions.command == "show protocols all"
+
+
+class TestBgpRouteParsing:
+    """BGP-learned route lines exercise the extended route-line grammar."""
+
+    def test_bgp_route_line(self) -> None:
+        result = load_fixture_result("bgp_route_all", command="show route all")
+        parsed = parse_route(result)
+
+        bgp = [e for e in parsed.entries if e.protocol == "peer_b"]
+        assert len(bgp) == 1
+        entry = bgp[0]
+        assert entry.prefix == "198.51.100.0/24"
+        assert entry.destination == "unreachable"
+        assert entry.from_ip == "127.0.0.3"
+        assert entry.primary
+        assert not entry.sync_error
+        assert entry.preference == 100
+        assert entry.info == "(100) [i]"
+
+    def test_bgp_attributes(self) -> None:
+        result = load_fixture_result("bgp_route_all", command="show route all")
+        parsed = parse_route(result)
+        entry = [e for e in parsed.entries if e.protocol == "peer_b"][0]
+        attrs = entry.attributes
+        assert attrs["bgp_origin"] == "IGP"
+        assert attrs["bgp_next_hop"] == "127.0.0.3"
+        assert attrs["bgp_local_pref"] == "100"
+        assert attrs["from"] == "127.0.0.3"
+        assert attrs["source"] == "BGP"
+        assert attrs["preference"] == "100"
+
+    def test_static_route_still_parses(self) -> None:
+        result = load_fixture_result("bgp_route_all", command="show route all")
+        parsed = parse_route(result)
+        entry = [e for e in parsed.entries if e.protocol == "stat_a"][0]
+        assert entry.prefix == "192.0.2.0/24"
+        assert entry.destination == "blackhole"
+        assert entry.from_ip is None
+        assert entry.preference == 200
+        assert entry.info == "(200)"
+        assert entry.attributes == {"preference": "200", "source": "static"}
+
+    def test_non_primary_route_line(self) -> None:
+        # A second candidate route carries no '*'/'!' marker at all.
+        text = (
+            "1007-Table master4:\n"
+            " 10.0.0.0/8           unicast [proto_a 13:22:41.388] * (100)\n"
+            " 10.0.0.0/8           unicast [proto_b 13:22:41.388] (100)\n"
+            "0000 \n"
+        )
+        parsed = parse_route(make_result_from_text(text, command="show route all"))
+        assert len(parsed.entries) == 2
+        assert parsed.entries[0].primary
+        assert not parsed.entries[1].primary
+        assert not parsed.entries[1].sync_error
+
+    def test_attribute_continuation_lines(self) -> None:
+        # Long community lists wrap; continuation lines have no "key: " shape.
+        entry = RouteEntry(
+            prefix="10.0.0.0/8",
+            destination="unicast",
+            protocol="bgp1",
+            timestamp="t",
+            primary=True,
+            via=[],
+            dev=[],
+            attribute_lines=[
+                "bgp_community: (65000,1) (65000,2)",
+                "(65000,3) (65000,4)",
+            ],
+            raw_lines=[],
+        )
+        attrs = entry.attributes
+        assert attrs["bgp_community"] == "(65000,1) (65000,2) (65000,3) (65000,4)"
+
+
+class TestPatternQueries:
+    def test_pattern_response(self) -> None:
+        result = load_fixture_result("show_protocols_pattern", command='show protocols "static*"')
+        parsed = parse_protocols(result)
+        assert len(parsed.rows) == 2
+        assert {r.name for r in parsed.rows} == {"static_test", "static_test2"}
+
+    def test_single_protocol_detail(self) -> None:
+        result = load_fixture_result("show_protocols_all_single", command="show protocols all static_test")
+        parsed = parse_protocols_all(result)
+        assert len(parsed.details) == 1
+        assert parsed.details[0].name == "static_test"
+        assert parsed.details[0].channels[0].routes_imported == 3
+
+    def test_where_proto_response(self) -> None:
+        result = load_fixture_result(
+            "show_route_where_proto", command='show route where proto = "static_test"'
+        )
+        parsed = parse_route(result)
+        assert len(parsed.entries) == 3
+        assert all(e.protocol == "static_test" for e in parsed.entries)
