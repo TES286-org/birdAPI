@@ -16,6 +16,14 @@ response for downstream display or logging.
   validated `RouteQuery` builder; a typed `RouteFilter` algebra for `where` clauses;
   high-level helpers (`route_lookup`, `route_exists`, `count_routes`, `bgp_sessions`,
   `get_protocol`, protocol patterns like `"bgp*"`).
+- **Protocol-specific queries** — static routes, the OSPF family (`show ospf`,
+  neighbors, interface, state/topology, lsadb with filters), BFD sessions (table
+  and verbose forms, with address/interface/family/mode filters), RIP and Babel
+  interface/neighbor tables, and MPLS label ranges.
+- **Asyncio support** — `AsyncBirdClient` mirrors the sync API with `async`
+  signatures, shares the exact same validated command builders (byte-identical
+  wire behaviour, enforced by parity tests) and serialises concurrent queries
+  safely.
 - **Injection-safe by construction** — every user-supplied value is validated before
   anything is written to the socket (see [Security](#security)).
 - **Read-only mode** — `BirdClient(read_only=True)` blocks every mutating command
@@ -99,6 +107,28 @@ client.find_protocols("bgp*")                          # shell-like pattern matc
 client.bgp_sessions(pattern="peer_*")                  # structured BGP session table
 ```
 
+### Protocol-specific queries
+
+```python
+# OSPF: area summary, neighbor table, interface details, LSDB
+info = client.show_ospf()
+assert info.areas[0].backbone and info.areas[0].neighbors_count == 0
+neigh = client.show_ospf_neighbors(interface="eth*")     # quoted patmatch filter
+lsas = client.show_ospf_lsadb(lsa_type=1, self_originated=True)
+
+# BFD: live session table (and verbose form)
+for row in client.show_bfd_sessions().rows:
+    print(row.address, row.state, row.interval, row.timeout)
+detail = client.show_bfd_sessions(all=True).details[0]
+print(detail.session_type, detail.local_params["Multiplier"])
+
+# Static / RIP / Babel / MPLS
+routes = client.show_static()                            # StaticRoute objects
+rip = client.show_rip_interfaces()                       # per-interface rows
+babel = client.show_babel_neighbors(interface="eth0")
+mpls = client.show_mpls_ranges()                         # per-domain ranges
+```
+
 ### BGP sessions
 
 `bgp_sessions()` decodes the BGP-specific `show protocols all` blocks into
@@ -153,6 +183,39 @@ Free-form surfaces (`raw()`, `eval()`, `RouteFilter.raw()`) still accept the ful
 command/filter language, but only on a single printable-ASCII line: they cannot break
 framing, so the worst case is a daemon-side syntax error, never a second command.
 
+## Async usage
+
+`AsyncBirdClient` has the same methods, validation and result models as
+`BirdClient` — just `await` them:
+
+```python
+import asyncio
+from bird_api import AsyncBirdClient, RouteQuery
+
+async def main():
+    async with AsyncBirdClient(socket_path="/tmp/bird.ctl") as client:
+        status = await client.show_status()
+        count = await client.count_routes(table="master4")
+        q = RouteQuery().table("master4").protocol("bgp1").all_details()
+        for entry in (await client.show_route_query(q)).entries:
+            print(entry.prefix, entry.attributes.get("bgp_next_hop"))
+
+    # Concurrent queries are fine — the connection serialises them safely:
+    async with AsyncBirdClient() as client:
+        bfd, ospf, rip = await asyncio.gather(
+            client.show_bfd_sessions(),
+            client.show_ospf(),
+            client.show_rip_interfaces(),
+        )
+
+asyncio.run(main())
+```
+
+Both stacks build commands through the same `bird_api.commands` module, so
+their wire behaviour is identical by construction (and enforced by tests
+that replay a full call battery through both). The `on_async` callback
+accepts plain functions or coroutine functions.
+
 ## Performance
 
 - One persistent socket per client; no per-command connect/disconnect.
@@ -168,18 +231,27 @@ framing, so the worst case is a daemon-side syntax error, never a second command
 # Unit tests (parsers, protocol, validation, query builders — no daemon needed)
 .venv/bin/python -m pytest tests --ignore=tests/e2e
 
-# End-to-end tests against a live BIRD 3.1.7 (needs the helper daemons)
+# End-to-end tests against live BIRD 3.1.7 (needs the helper daemons)
 /home/z/my-project/scripts/start-bird.sh        # base daemon: /tmp/bird-test.ctl
-/home/z/my-project/scripts/start-bgp-pair.sh    # iBGP pair:   /tmp/bird-bgp-a.ctl
+/home/z/my-project/scripts/start-bgp-pair.sh    # protocol pair: /tmp/bird-bgp-a.ctl
 .venv/bin/python -m pytest tests/e2e
 ```
+
+The pair daemons run iBGP (established), a real multihop BFD session
+(`127.0.0.2 <-> 127.0.0.3`, Up), OSPF/BFD/RIP/Babel protocol instances and
+static routes. Sandbox limits: no `CAP_NET_RAW` means OSPF cannot form
+adjacencies, and shared interfaces mean RIP/Babel have no peers — their
+empty tables are asserted as such and row parsing is covered by
+format-faithful synthetic fixtures. The BFD daemon pair needs an
+`LD_PRELOAD` shim (`scripts/libpriorityshim.so`) because BIRD hardcodes
+`SO_PRIORITY=7`, which unprivileged containers reject.
 
 The e2e suite includes an injection-attack battery (framing and lexical payloads
 against every input slot), read-only enforcement, complex-query round-trips and a
 real iBGP session established over loopback between two BIRD instances — no root
 required (port 1179 + `strict bind` on distinct 127/8 addresses).
 
-Quality gates: `ruff check`, `mypy --strict` (0 errors), 426 tests.
+Quality gates: `ruff check`, `mypy --strict` (0 errors), 521 tests.
 
 ## License
 

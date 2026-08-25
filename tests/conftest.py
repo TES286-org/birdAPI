@@ -12,18 +12,14 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable
 from pathlib import Path
 
 from bird_api.exceptions import BirdCommandError, BirdConnectionError, BirdValidationError
 from bird_api.protocol import CommandResult, assemble_result, parse_line
-from bird_api.validation import validate_command_line
+from bird_api.validation import is_read_only_command, validate_command_line
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "raw"
-
-# Mirror of connection._READ_ONLY_COMMAND_RE.
-_FAKE_READ_ONLY_RE = re.compile(r"\A(?:show\b|configure\s+status\b|restrict\b)")
 
 
 def load_fixture(name: str) -> bytes:
@@ -131,7 +127,7 @@ class FakeBirdConnection:
                 command=command,
             )
         validate_command_line(command)
-        if self.read_only and not _FAKE_READ_ONLY_RE.match(command):
+        if self.read_only and not is_read_only_command(command):
             raise BirdValidationError(
                 f"read-only connection rejects command {command!r}",
                 field="command",

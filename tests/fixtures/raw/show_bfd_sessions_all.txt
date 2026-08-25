@@ -1,0 +1,25 @@
+1020-bfd_test:
+   Address:              127.0.0.3
+   Interface:            ---
+   Session type:         Multihop
+   Session state:        Up
+   Remote state:         Up
+   Last state change:    05:32:42.734
+   Local diagnostic:     None
+   Remote diagnostic:    None
+   Local discriminator:  2370786090
+   Remote discriminator: 683441413
+   Transmit timer:       0.001 / 0.100
+   Detect timer:         0.467 / 0.500
+   Local parameters:
+     Min TX interval:    0.100
+     Min RX interval:    0.010
+     Demand mode:        No
+     Multiplier:         5
+   Remote parameters:
+     Min TX interval:    0.100
+     Min RX interval:    0.010
+     Demand mode:        No
+     Multiplier:         5
+ 
+0000 

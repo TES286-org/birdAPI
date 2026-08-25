@@ -1,0 +1,13 @@
+1015-ospf_a:
+ Interface eth0 (21.0.22.68/32)
+ 	Type: ptp
+ 	Area: 0.0.0.0 (0)
+ 	State: PtP (stub)
+ 	Priority: 1
+ 	Cost: 10
+ 	ECMP weight: 1
+ 	Hello timer: 2
+ 	Wait timer: 8
+ 	Dead timer: 8
+ 	Retransmit timer: 5
+0000 

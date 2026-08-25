@@ -1,0 +1,3 @@
+1013-ospf_a:
+ Router ID   	Pri	     State     	DTime	Interface  Router IP
+0000 

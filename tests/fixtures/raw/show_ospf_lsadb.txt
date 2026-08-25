@@ -1,0 +1,6 @@
+1017-
+ Area 0.0.0.0
+ 
+  Type   LS ID           Router          Sequence   Age  Checksum
+  0001  10.0.0.1        10.0.0.1         80000001   171    1f6e
+0000 

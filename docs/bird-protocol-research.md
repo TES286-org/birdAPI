@@ -1101,3 +1101,68 @@ expressions and is unnecessary for monitoring).
 * Two BIRD instances can peer over loopback without root using
   `local <ip> port 1179 …; strict bind;` on distinct 127/8 addresses
   (used by the e2e BGP tests).
+
+## 8. Protocol-Specific Query Commands (v0.3.0)
+
+### 8.1 Commands and reply codes
+
+| Wire command | Reply code | Handler |
+|---|---|---|
+| `show static [<name>]` | 1009 | `static_show()` — proto/static/static.c:855 |
+| `show ospf [<name>]` | 1014 | `ospf_sh()` — proto/ospf/ospf.c:799 |
+| `show ospf neighbors [<name>] ["<iface>"]` | 1013 | `ospf_sh_neigh()` — ospf.c:777 |
+| `show ospf interface [<name>] ["<iface>"]` | 1015 | `ospf_sh_iface()` — ospf.c:882 |
+| `show ospf state [all] [<name>]` | 1016 | `ospf_sh_state()` — ospf.c:1204 |
+| `show ospf topology [all] [<name>]` | 1016 | same handler, `reachable=0` |
+| `show ospf lsadb [global\|area <id>\|link] [type <n>] [lsid <id>] [self\|router <id>] [<proto>]` | 1017 | `ospf_sh_lsadb()` — ospf.c:1431 |
+| `show bfd sessions [<name>] [address <ip\|prefix>] [(interface\|dev) "<name>"] [ipv4\|ipv6] [direct\|multihop] [all]` | 1020 | `bfd_show_sessions()` — proto/bfd/bfd.c:1262 |
+| `show rip interfaces [<name>] ["<iface>"]` | 1021 | `rip_show_interfaces()` — proto/rip/rip.c:1249 |
+| `show rip neighbors [<name>] ["<iface>"]` | 1022 | `rip_show_neighbors()` — rip.c:1284 |
+| `show babel interfaces [<name>] ["<iface>"]` | 1023 | `babel_show_interfaces()` — proto/babel/babel.c:2229 |
+| `show babel neighbors [<name>] ["<iface>"]` | 1024 | `babel_show_neighbors()` — babel.c:2266 |
+| `show mpls ranges` | 1026 | `mpls_show_ranges()` — nest/mpls.c |
+
+### 8.2 Grammar facts (verified live on 3.1.7)
+
+* The `<name>` argument of these commands is **optproto** — a bare *known
+  symbol* (an identifier), never a quoted pattern. Bare wildcards are
+  syntax errors. With several instances running, the daemon requires the
+  name (`proto_get_named()` errors "There are multiple X protocols
+  running").
+* The `"<iface>"` argument is **opttext** — a TEXT token, always
+  double-quoted; unquoted fails with
+  `9001 ... expecting CF_SYM_KNOWN or TEXT`. It is matched with
+  `patmatch()` (wildcards `*` / `?` honoured). The same applies to
+  `show bfd sessions interface/dev "<name>"`.
+* Every protocol-show command answers a single `<name>: is not up` line
+  (same reply code as its normal form) when the protocol is not running.
+* `show mpls ranges` without any configured MPLS domain answers
+  `9001 No MPLS domain defined`.
+* `show bfd sessions <ip>` is a syntax error — the IP must be introduced
+  by the `address` keyword; `address` takes a bare IP or a prefix
+  (`net_or_ipa`).
+
+### 8.3 Sandbox constraints discovered while building the e2e environment
+
+* **Linux marks loopback interfaces `IF_IGNORE`** (sysdep/linux/netlink.c),
+  and OSPF additionally skips `IF_LOOPBACK` — `interface "lo"` never
+  activates for OSPF/RIP/Babel.
+* **Raw sockets (IP protocol 89) require `CAP_NET_RAW`** — the sandbox has
+  zero capabilities, so OSPF degrades every interface to *stub* and no
+  adjacency can form (`Socket error: socket: Operation not permitted`).
+* **`neigh_find()` rejects SCOPE_HOST addresses** — single-hop BFD to
+  `127.x.x.x` fails with `Invalid remote address`. **Multihop BFD** skips
+  `neigh_find` entirely, so `neighbor <ip> local <ip> multihop` between
+  two daemons over distinct 127/8 addresses works.
+* **BIRD hardcodes `SO_PRIORITY=7`** for BFD sockets
+  (`sk_priority_control`, sysdep/linux/sysio.h); values > 6 need
+  `CAP_NET_ADMIN`, so unprivileged containers kill BFD socket setup.
+  Workaround: an `LD_PRELOAD` shim (scripts/libpriorityshim.so) that caps
+  SO_PRIORITY at 6 — no protocol semantics change, only the kernel
+  queueing class.
+* **RIP binds a privileged port (520)** by default — unprivileged
+  daemons need `port <n> >= 1024` per interface.
+* **RIP and Babel identify peers by source address**, which is identical
+  for two daemons sharing an interface (and RIP drops packets whose
+  source equals its own socket address) — no same-host peering for these
+  protocols without distinct interface addresses.

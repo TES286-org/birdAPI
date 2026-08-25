@@ -1,0 +1,7 @@
+1026-MPLS domain test_dom:
+ Range         Start  Length     End  Labels    Last
+ static           16     984    1000       0       0
+ dynamic        1000    9000   10000       0       0
+ static_r       1000     200    1200       0       0
+ dynamic_r      5000    1000    6000       0       0
+0000 

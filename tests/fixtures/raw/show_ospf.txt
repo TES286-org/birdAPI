@@ -1,0 +1,14 @@
+1014-ospf_a:
+ RFC1583 compatibility: disabled
+ Stub router: No
+ RT scheduler tick: 1
+ Number of areas: 1
+ Number of LSAs in DB:	1
+ 	Area: 0.0.0.0 (0) [BACKBONE]
+ 		Stub:	No
+ 		NSSA:	No
+ 		Transit:	No
+ 		Number of interfaces:	1
+ 		Number of neighbors:	0
+ 		Number of adjacent neighbors:	0
+0000 

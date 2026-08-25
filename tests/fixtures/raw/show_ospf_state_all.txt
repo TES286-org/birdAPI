@@ -1,0 +1,7 @@
+1016-
+ area 0.0.0.0
+ 
+ 	router 10.0.0.1
+ 		distance 0
+ 		stubnet 21.0.22.68/32 metric 0
+0000 

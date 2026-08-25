@@ -1,0 +1,4 @@
+1023-babel_test:
+ Interface  State  Auth  RX cost   Nbrs   Timer Next hop (v4)   Next hop (v6)
+ eth0       Up     No         96      0   2.023 21.0.22.68      fe80::3452:3bff:fe15:9910
+0000 

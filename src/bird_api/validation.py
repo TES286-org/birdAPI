@@ -56,12 +56,15 @@ __all__ = [
     "MAX_PATTERN_LENGTH",
     "MAX_FILTER_LENGTH",
     "MAX_PATH_LENGTH",
+    "READ_ONLY_COMMAND_RE",
+    "is_read_only_command",
     "validate_command_line",
     "validate_identifier",
     "validate_pattern",
     "format_pattern",
     "validate_prefix",
     "validate_address",
+    "validate_net_or_ip",
     "validate_choice",
     "validate_filter_expression",
     "validate_path",
@@ -92,6 +95,24 @@ _PATTERN_RE: Final = re.compile(r"\A[\x20-\x7e]+\Z")
 _PATH_RE: Final = re.compile(r"\A[\x20-\x7e]+\Z")
 # A dotted BIRD channel reference: <protocol>.<channel> (nest/config.Y channel_arg).
 _CHANNEL_ARG_RE: Final = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\Z")
+
+# Read-only command allowlist shared by the sync and async connections
+# (and the test fakes). Only inspection commands pass; anything that mutates
+# daemon state (configure / enable / disable / restart / reload / dump / down /
+# ...) or session state is rejected client-side, before a single byte is
+# written to the socket. This is deliberately conservative: ``eval`` and
+# ``echo`` are excluded too (they are not needed for monitoring and ``eval``
+# can burn daemon CPU on pathological expressions). ``configure status`` is
+# read-only introspection, and ``restrict`` only ever *tightens* the
+# session's own permissions, so both are allowed.
+READ_ONLY_COMMAND_RE: Final[re.Pattern[str]] = re.compile(
+    r"\A(?:show\b|configure\s+status\b|restrict\b)",
+)
+
+
+def is_read_only_command(command: str) -> bool:
+    """Return ``True`` when ``command`` is allowed on a ``read_only`` connection."""
+    return READ_ONLY_COMMAND_RE.match(command) is not None
 
 
 # --- internal helpers --------------------------------------------------------
@@ -247,6 +268,38 @@ def validate_address(value: object, *, field: str = "address") -> str:
     except ValueError as exc:
         _fail(field, value, f"not a valid IP address ({exc})")
         raise  # unreachable; placate type checkers
+
+
+def validate_net_or_ip(value: object, *, field: str = "address or prefix") -> str:
+    """Validate an argument accepted by BIRD's ``net_or_ipa`` rule.
+
+    Accepts a bare IP address (kept bare — exact-address semantics) or an
+    IP prefix (canonicalised, host bits rejected). Used by
+    ``show bfd sessions address …``.
+    """
+    if isinstance(value, ipaddress.IPv4Address | ipaddress.IPv6Address):
+        return str(value)
+    if isinstance(value, ipaddress.IPv4Network | ipaddress.IPv6Network):
+        return str(value)
+    if not isinstance(value, str):
+        _fail(field, value, f"expected str or ipaddress value, got {type(value).__name__}")
+    assert isinstance(value, str)
+    if len(value) > 64:
+        _fail(field, value, "too long")
+    _check_no_control(value, field)
+    stripped = value.strip()
+    if not stripped:
+        _fail(field, value, "must not be empty")
+    if "/" not in stripped:
+        try:
+            return str(ipaddress.ip_address(stripped))
+        except ValueError as exc:
+            _fail(field, value, f"not a valid IP address ({exc})")
+    try:
+        return str(ipaddress.ip_network(stripped, strict=True))
+    except ValueError as exc:
+        _fail(field, value, f"not a valid IP prefix ({exc})")
+    raise  # unreachable; placate type checkers
 
 
 def validate_choice(value: object, allowed: Iterable[str], *, field: str = "option") -> str:

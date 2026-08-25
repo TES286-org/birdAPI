@@ -543,3 +543,201 @@ class TestNoMatchTranslations:
         client = make_client_with_responses([b"8002 something else\n"])
         with pytest.raises(BirdCommandError):
             client.show_protocols(pattern="bgp*")
+
+
+# ---------------------------------------------------------------------------
+# Protocol-specific query commands (OSPF / BFD / RIP / Babel / static / MPLS)
+# ---------------------------------------------------------------------------
+
+_OSPF_SUMMARY = (
+    b"1014-ospf_a:\n"
+    b" RFC1583 compatibility: disabled\n"
+    b" Number of areas: 1\n"
+    b" \tArea: 0.0.0.0 (0) [BACKBONE]\n"
+    b" \t\tNumber of interfaces:\t1\n"
+    b"0000 \n"
+)
+_OSPF_NEIGHBORS = (
+    b"1013-ospf_a:\n"
+    b" Router ID   \tPri\t     State     \tDTime\tInterface  Router IP\n"
+    b" 10.0.0.2   \t  1\tFull/PtP     \t   32\teth0       21.0.22.68\n"
+    b"0000 \n"
+)
+_BFD_TABLE = (
+    b"1020-bfd_test:\n"
+    b" IP address                Interface  State      Since         Interval  Timeout\n"
+    b" 127.0.0.3                 ---        Up         05:32:42.734    0.100    0.500\n"
+    b"0000 \n"
+)
+_RIP_IFACES = (
+    b"1021-rip_test:\n"
+    b" Interface  State  Metric   Nbrs   Timer\n"
+    b" eth0       Up          1      0  26.170\n"
+    b"0000 \n"
+)
+_BABEL_IFACES = (
+    b"1023-babel_test:\n"
+    b" Interface  State  Auth  RX cost   Nbrs   Timer Next hop (v4)   Next hop (v6)\n"
+    b" eth0       Up     No         96      0   1.535 21.0.22.68      fe80::1\n"
+    b"0000 \n"
+)
+_MPLS = (
+    b"1026-MPLS domain test_dom:\n"
+    b" Range         Start  Length     End  Labels    Last\n"
+    b" static_r       1000     200    1200       0       0\n"
+    b"0000 \n"
+)
+
+
+class TestProtocolQueryCommands:
+    def test_show_static(self) -> None:
+        client = make_client_with_responses([b"1009-192.0.2.0/24\tblackhole\n0000 \n"])
+        result = client.show_static()
+        assert client._conn.calls == ["show static"]  # type: ignore[attr-defined]
+        assert result.routes[0].prefix == "192.0.2.0/24"
+
+    def test_show_static_with_name(self) -> None:
+        client = make_client_with_responses([b"1009-192.0.2.0/24\tblackhole\n0000 \n"])
+        client.show_static("static_test")
+        assert client._conn.calls == ["show static static_test"]  # type: ignore[attr-defined]
+
+    def test_show_static_rejects_injection(self) -> None:
+        client = make_client_with_responses([])
+        with pytest.raises(BirdValidationError):
+            client.show_static("x\ndown")
+        with pytest.raises(BirdValidationError):
+            client.show_static("wild*card")  # optproto wants a bare symbol
+
+    def test_show_ospf(self) -> None:
+        client = make_client_with_responses([_OSPF_SUMMARY])
+        result = client.show_ospf()
+        assert client._conn.calls == ["show ospf"]  # type: ignore[attr-defined]
+        assert result.protocol == "ospf_a"
+        assert result.areas[0].backbone
+
+    def test_show_ospf_with_name(self) -> None:
+        client = make_client_with_responses([_OSPF_SUMMARY])
+        client.show_ospf("ospf_a")
+        assert client._conn.calls == ["show ospf ospf_a"]  # type: ignore[attr-defined]
+
+    def test_show_ospf_neighbors(self) -> None:
+        client = make_client_with_responses([_OSPF_NEIGHBORS])
+        result = client.show_ospf_neighbors()
+        assert client._conn.calls == ["show ospf neighbors"]  # type: ignore[attr-defined]
+        assert result.rows[0].router_id == "10.0.0.2"
+
+    def test_show_ospf_neighbors_with_filters(self) -> None:
+        client = make_client_with_responses([_OSPF_NEIGHBORS])
+        client.show_ospf_neighbors("ospf_a", "eth*")
+        assert client._conn.calls == ['show ospf neighbors ospf_a "eth*"']  # type: ignore[attr-defined]
+
+    def test_show_ospf_neighbors_rejects_injection(self) -> None:
+        client = make_client_with_responses([])
+        with pytest.raises(BirdValidationError):
+            client.show_ospf_neighbors("x\ndown")
+        with pytest.raises(BirdValidationError):
+            client.show_ospf_neighbors(interface="eth0\"\ndown")
+
+    def test_show_ospf_interface(self) -> None:
+        client = make_client_with_responses([b"1015-ospf_a:\n0000 \n"])
+        client.show_ospf_interface("ospf_a", "eth0")
+        assert client._conn.calls == ['show ospf interface ospf_a "eth0"']  # type: ignore[attr-defined]
+
+    def test_show_ospf_state_and_topology(self) -> None:
+        client = make_client_with_responses(
+            [b"1016-\n area 0.0.0.0\n0000 \n", b"1016-\n area 0.0.0.0\n0000 \n"]
+        )
+        client.show_ospf_state()
+        client.show_ospf_topology(all=True)
+        assert client._conn.calls == [  # type: ignore[attr-defined]
+            "show ospf state",
+            "show ospf topology all",
+        ]
+
+    def test_show_ospf_lsadb_filters(self) -> None:
+        client = make_client_with_responses([b"1017-\n Global\n0000 \n"] * 4)
+        client.show_ospf_lsadb()
+        client.show_ospf_lsadb(scope="global")
+        client.show_ospf_lsadb(area="0.0.0.1", lsa_type=1)
+        client.show_ospf_lsadb(self_originated=True)
+        assert client._conn.calls == [  # type: ignore[attr-defined]
+            "show ospf lsadb",
+            "show ospf lsadb global",
+            "show ospf lsadb area 0.0.0.1 type 1",
+            "show ospf lsadb self",
+        ]
+
+    def test_show_ospf_lsadb_validation(self) -> None:
+        client = make_client_with_responses([])
+        with pytest.raises(BirdValidationError):
+            client.show_ospf_lsadb(scope="everywhere")
+        with pytest.raises(BirdValidationError):
+            client.show_ospf_lsadb(area="not-an-ip")
+        with pytest.raises(BirdValidationError):
+            client.show_ospf_lsadb(lsa_type=999999)
+
+    def test_show_bfd_sessions(self) -> None:
+        client = make_client_with_responses([_BFD_TABLE])
+        result = client.show_bfd_sessions()
+        assert client._conn.calls == ["show bfd sessions"]  # type: ignore[attr-defined]
+        assert result.rows[0].state == "Up"
+
+    def test_show_bfd_sessions_filters(self) -> None:
+        client = make_client_with_responses([_BFD_TABLE] * 3)
+        client.show_bfd_sessions(address="127.0.0.3")
+        client.show_bfd_sessions(address="10.0.0.0/8", interface="eth*")
+        client.show_bfd_sessions(family="ipv6", mode="multihop", all=True)
+        assert client._conn.calls == [  # type: ignore[attr-defined]
+            "show bfd sessions address 127.0.0.3",
+            'show bfd sessions address 10.0.0.0/8 interface "eth*"',
+            "show bfd sessions ipv6 multihop all",
+        ]
+
+    def test_show_bfd_sessions_validation(self) -> None:
+        client = make_client_with_responses([])
+        with pytest.raises(BirdValidationError):
+            client.show_bfd_sessions("x\ndown")
+        with pytest.raises(BirdValidationError):
+            client.show_bfd_sessions(address="garbage")
+        with pytest.raises(BirdValidationError):
+            client.show_bfd_sessions(family="ipx")
+        with pytest.raises(BirdValidationError):
+            client.show_bfd_sessions(mode="any")
+
+    def test_show_rip(self) -> None:
+        client = make_client_with_responses([_RIP_IFACES, _RIP_IFACES])
+        result = client.show_rip_interfaces()
+        client.show_rip_neighbors("rip_test", "eth0")
+        assert client._conn.calls == [  # type: ignore[attr-defined]
+            "show rip interfaces",
+            'show rip neighbors rip_test "eth0"',
+        ]
+        assert result.rows[0].interface == "eth0"
+
+    def test_show_babel(self) -> None:
+        client = make_client_with_responses([_BABEL_IFACES, _BABEL_IFACES])
+        result = client.show_babel_interfaces()
+        client.show_babel_neighbors("babel_test", "eth*")
+        assert client._conn.calls == [  # type: ignore[attr-defined]
+            "show babel interfaces",
+            'show babel neighbors babel_test "eth*"',
+        ]
+        assert result.rows[0].rxcost == 96
+
+    def test_show_mpls_ranges(self) -> None:
+        client = make_client_with_responses([_MPLS])
+        result = client.show_mpls_ranges()
+        assert client._conn.calls == ["show mpls ranges"]  # type: ignore[attr-defined]
+        assert result.domains[0].domain == "test_dom"
+        assert result.domains[0].rows[0].start == 1000
+
+    def test_sync_and_async_builders_identical(self) -> None:
+        """The shared commands module guarantees identical wire strings."""
+        from bird_api import commands as cmd
+
+        assert cmd.build_show_ospf_neighbors("a", "b") == 'show ospf neighbors a "b"'
+        assert cmd.build_show_bfd_sessions("x", address="1.2.3.4") == (
+            "show bfd sessions x address 1.2.3.4"
+        )
+        assert cmd.build_show_ospf_lsadb(scope="global") == "show ospf lsadb global"
+        assert cmd.build_show_mpls_ranges() == "show mpls ranges"

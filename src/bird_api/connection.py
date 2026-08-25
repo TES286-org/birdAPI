@@ -21,7 +21,6 @@ import contextlib
 import errno
 import logging
 import os
-import re
 import select
 import socket
 import time
@@ -36,7 +35,7 @@ from .exceptions import (
     BirdValidationError,
 )
 from .protocol import CommandResult, ReplyLine, assemble_result, parse_line
-from .validation import validate_command_line
+from .validation import is_read_only_command, validate_command_line
 
 __all__ = ["BirdConnection", "DEFAULT_SOCKET_PATH", "DEFAULT_TIMEOUT"]
 
@@ -53,20 +52,6 @@ DEFAULT_TIMEOUT: float = 30.0
 # We tolerate a slightly older/newer version string but we do drain it
 # before issuing any commands.
 _BANNER_CODE: Final[int] = 1
-
-# Read-only command allowlist for connections created with ``read_only=True``.
-# Only inspection commands pass; anything that mutates daemon state
-# (configure / enable / disable / restart / reload / dump / down / …) or
-# session state is rejected client-side, before a single byte is written to
-# the socket. This is deliberately conservative: ``eval`` and ``echo`` are
-# excluded too (they are not needed for monitoring and ``eval`` can burn
-# daemon CPU on pathological expressions). ``configure status`` is
-# read-only introspection, and ``restrict`` only ever *tightens* the
-# session's own permissions, so both are allowed.
-_READ_ONLY_COMMAND_RE: Final[re.Pattern[str]] = re.compile(
-    r"\A(?:show\b|configure\s+status\b|restrict\b)",
-)
-
 
 AsyncCallback = Callable[[str], None]
 """Signature of the optional callback invoked for every ``+``-prefixed async message."""
@@ -221,7 +206,7 @@ class BirdConnection:
         # onto the wire through the escape hatch.
         validate_command_line(command)
 
-        if self._read_only and not _READ_ONLY_COMMAND_RE.match(command):
+        if self._read_only and not is_read_only_command(command):
             raise BirdValidationError(
                 f"read-only connection rejects command {command!r}",
                 field="command",
@@ -246,26 +231,32 @@ class BirdConnection:
         payload = (command + "\n").encode("utf-8")
         self._send_all(payload, deadline)
 
-        # Read reply lines until we see a FINAL line.
+        # Read reply lines until we see a FINAL line. On timeout the receive
+        # buffer may hold a partial response — dropping the socket forces a
+        # clean reconnect instead of desynchronising the next command.
         lines: list[ReplyLine] = []
-        while True:
-            line = self._read_line(deadline)
-            if line is None:
-                # Socket closed cleanly mid-response.
-                raise BirdConnectionError(
-                    "BIRD daemon closed the connection mid-response",
-                )
+        try:
+            while True:
+                line = self._read_line(deadline)
+                if line is None:
+                    # Socket closed cleanly mid-response.
+                    raise BirdConnectionError(
+                        "BIRD daemon closed the connection mid-response",
+                    )
 
-            if line.kind.name == "ASYNC":
-                # Async message: dispatch to callback, do not terminate the response.
-                if self._on_async is not None:
-                    self._on_async(line.text)
+                if line.kind.name == "ASYNC":
+                    # Async message: dispatch to callback, do not terminate the response.
+                    if self._on_async is not None:
+                        self._on_async(line.text)
+                    lines.append(line)
+                    continue
+
                 lines.append(line)
-                continue
-
-            lines.append(line)
-            if line.kind.name == "FINAL":
-                break
+                if line.kind.name == "FINAL":
+                    break
+        except BirdTimeoutError:
+            self._mark_dead()
+            raise
 
         result = assemble_result(command, lines)
         if not result.success:

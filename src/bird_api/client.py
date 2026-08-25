@@ -4,19 +4,21 @@ A :class:`BirdClient` owns a :class:`~bird_api.connection.BirdConnection`
 (persistent Unix socket) and exposes one method per supported BIRD command
 family. Each method:
 
-1. **Validates** every caller-supplied argument through
-   :mod:`bird_api.validation` (this is the injection-prevention layer —
-   see that module's docstring for the threat model).
-2. Builds the wire command string (with optional arguments).
-3. Calls :meth:`BirdConnection.execute` to send it and collect the response.
-4. Dispatches the response to the matching parser, which returns a typed
+1. **Validates** every caller-supplied argument by building the wire
+   command through :mod:`bird_api.commands` (backed by
+   :mod:`bird_api.validation` — the injection-prevention layer; see that
+   module's docstring for the threat model).
+2. Calls :meth:`BirdConnection.execute` to send it and collect the response.
+3. Dispatches the response to the matching parser, which returns a typed
    :class:`~bird_api.models.ParsedResponse` carrying both structured fields
    and the original raw text.
 
 The connection is opened lazily on the first command and reused across
 all subsequent commands until :meth:`close` is called. If the underlying
 socket dies (e.g. the daemon was restarted), the next command triggers a
-transparent reconnect.
+transparent reconnect. An asyncio counterpart with an identical API lives
+in :mod:`bird_api.async_client` — both share the same command builders,
+so their wire behaviour is byte-identical by construction.
 
 Complex queries
 ---------------
@@ -42,52 +44,65 @@ Example
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import Any
 
+from . import commands as cmd
 from .connection import DEFAULT_SOCKET_PATH, DEFAULT_TIMEOUT, AsyncCallback, BirdConnection
 from .exceptions import BirdCommandError
 from .models import (
     ActionResult,
+    BabelInterfacesResult,
+    BabelNeighborsResult,
+    BfdSessionsResult,
     BgpSessionsResult,
     ConfigResult,
     EvalResult,
     InterfacesResult,
     InterfacesSummaryResult,
     MemoryInfo,
+    MplsRangesResult,
+    OspfInfo,
+    OspfInterfacesResult,
+    OspfLsadbResult,
+    OspfNeighborsResult,
+    OspfStateResult,
     ProtocolDetail,
     ProtocolsAllResult,
     ProtocolsResult,
+    RipInterfacesResult,
+    RipNeighborsResult,
     RouteResult,
+    StaticResult,
     Status,
     SymbolsResult,
 )
 from .parsers import (
     parse_action,
+    parse_babel_interfaces,
+    parse_babel_neighbors,
+    parse_bfd_sessions,
     parse_bgp_sessions,
     parse_configure,
     parse_eval,
     parse_interfaces,
     parse_interfaces_summary,
     parse_memory,
+    parse_mpls_ranges,
+    parse_ospf,
+    parse_ospf_interfaces,
+    parse_ospf_lsadb,
+    parse_ospf_neighbors,
+    parse_ospf_state,
     parse_protocols,
     parse_protocols_all,
+    parse_rip_interfaces,
+    parse_rip_neighbors,
     parse_route,
+    parse_static,
     parse_status,
     parse_symbols,
 )
 from .protocol import CommandResult
 from .queries import RouteQuery
-from .validation import (
-    format_pattern,
-    validate_address,
-    validate_choice,
-    validate_filter_expression,
-    validate_identifier,
-    validate_path,
-    validate_pattern,
-    validate_positive_int,
-    validate_prefix,
-)
 
 __all__ = ["BirdClient", "DEFAULT_SOCKET_PATH", "DEFAULT_TIMEOUT"]
 
@@ -155,13 +170,11 @@ class BirdClient:
 
     def show_status(self) -> Status:
         """``show status`` — daemon version, router ID, uptime, state."""
-        result = self._conn.execute("show status")
-        return parse_status(result)
+        return parse_status(self._conn.execute(cmd.build_show_status()))
 
     def show_memory(self) -> MemoryInfo:
         """``show memory`` — memory-usage table per resource kind."""
-        result = self._conn.execute("show memory")
-        return parse_memory(result)
+        return parse_memory(self._conn.execute(cmd.build_show_memory()))
 
     def show_protocols(self, *, pattern: str | None = None) -> ProtocolsResult:
         """``show protocols [<pattern>]`` — one-line summary per protocol.
@@ -172,30 +185,26 @@ class BirdClient:
             Optional protocol name or shell-like pattern (``bgp*``, ``ospf?``).
             Bare identifiers and ``"all"`` are sent unquoted; anything else
             is double-quoted, which is how BIRD's grammar accepts patterns.
+            A non-matching pattern yields an empty result (the daemon's
+            ``8003 No protocols match`` is translated).
         """
-        cmd = "show protocols"
-        if pattern is not None:
-            cmd += " " + format_pattern(pattern, field="pattern")
+        wire = cmd.build_show_protocols(pattern)
         try:
-            result = self._conn.execute(cmd)
+            result = self._conn.execute(wire)
         except BirdCommandError as exc:
-            # 8003 "No protocols match" is a legitimate empty answer to a
-            # pattern query, not a failure.
             if exc.code == 8003:
-                return ProtocolsResult(raw_text=exc.message or "", command=cmd, rows=[])
+                return ProtocolsResult(raw_text=exc.message or "", command=wire, rows=[])
             raise
         return parse_protocols(result)
 
     def show_protocols_all(self, *, pattern: str | None = None) -> ProtocolsAllResult:
         """``show protocols all [<pattern>]`` — full per-protocol verbose block."""
-        cmd = "show protocols all"
-        if pattern is not None:
-            cmd += " " + format_pattern(pattern, field="pattern")
+        wire = cmd.build_show_protocols_all(pattern)
         try:
-            result = self._conn.execute(cmd)
+            result = self._conn.execute(wire)
         except BirdCommandError as exc:
             if exc.code == 8003:
-                return ProtocolsAllResult(raw_text=exc.message or "", command=cmd, rows=[], details=[])
+                return ProtocolsAllResult(raw_text=exc.message or "", command=wire, rows=[], details=[])
             raise
         return parse_protocols_all(result)
 
@@ -207,9 +216,9 @@ class BirdClient:
         a clean miss). Prefer :meth:`show_protocols_all` with a pattern for
         fuzzy matching.
         """
-        wire = format_pattern(name, field="protocol name")
+        wire = cmd.build_get_protocol(name)
         try:
-            result = self._conn.execute(f"show protocols all {wire}")
+            result = self._conn.execute(wire)
         except BirdCommandError as exc:
             # Unknown symbol is reported as a parse error (9001) by BIRD, and
             # a non-matching pattern as 8003; treat both as "not found".
@@ -227,9 +236,7 @@ class BirdClient:
 
         Pass ``all=True`` for the verbose attribute dump.
         """
-        cmd = "show route" + (" all" if all else "")
-        result = self._conn.execute(cmd)
-        return parse_route(result)
+        return parse_route(self._conn.execute(cmd.build_show_route(all=all)))
 
     def show_route_query(self, query: RouteQuery) -> RouteResult:
         """Execute a :class:`~bird_api.queries.RouteQuery` (full ``show route`` grammar).
@@ -241,64 +248,43 @@ class BirdClient:
                 RouteQuery().table("master4").protocol("bgp1").all_details()
             )
         """
-        result = self._conn.execute(query.build())
-        return parse_route(result)
+        return parse_route(self._conn.execute(cmd.build_show_route_query(query)))
 
     def show_route_prefix(self, prefix: str, *, all: bool = False) -> RouteResult:
         """``show route <prefix> [all]`` — routes for a specific network."""
-        prefix = validate_prefix(prefix, field="prefix")
-        cmd = f"show route {prefix}" + (" all" if all else "")
-        result = self._conn.execute(cmd)
-        return parse_route(result)
+        return parse_route(self._conn.execute(cmd.build_show_route_prefix(prefix, all=all)))
 
     def show_route_for(self, address: str, *, all: bool = False) -> RouteResult:
         """``show route for <ip> [all]`` — routes that would be used to reach <address>."""
-        address = validate_address(address, field="address")
-        cmd = f"show route for {address}" + (" all" if all else "")
-        result = self._conn.execute(cmd)
-        return parse_route(result)
+        return parse_route(self._conn.execute(cmd.build_show_route_for(address, all=all)))
 
     def show_route_in(self, prefix: str, *, all: bool = False) -> RouteResult:
         """``show route in <prefix> [all]`` — routes contained within <prefix>."""
-        prefix = validate_prefix(prefix, field="prefix")
-        cmd = f"show route in {prefix}" + (" all" if all else "")
-        result = self._conn.execute(cmd)
-        return parse_route(result)
+        return parse_route(self._conn.execute(cmd.build_show_route_in(prefix, all=all)))
 
     def show_route_table(self, table: str, *, all: bool = False) -> RouteResult:
         """``show route table <name> [all]`` — routes from a named table."""
-        table = validate_identifier(table, field="table name")
-        cmd = f"show route table {table}" + (" all" if all else "")
-        result = self._conn.execute(cmd)
-        return parse_route(result)
+        return parse_route(self._conn.execute(cmd.build_show_route_table(table, all=all)))
 
     def show_route_protocol(self, protocol: str, *, all: bool = False) -> RouteResult:
         """``show route protocol <name> [all]`` — routes learned from a specific protocol."""
-        protocol = validate_identifier(protocol, field="protocol name")
-        cmd = f"show route protocol {protocol}" + (" all" if all else "")
-        result = self._conn.execute(cmd)
-        return parse_route(result)
+        return parse_route(self._conn.execute(cmd.build_show_route_protocol(protocol, all=all)))
 
     def show_route_stats(self) -> RouteResult:
         """``show route stats`` — per-table and total route counts."""
-        result = self._conn.execute("show route stats")
-        return parse_route(result)
+        return parse_route(self._conn.execute(cmd.build_show_route_stats()))
 
     def show_symbols(self, *, table: bool = False) -> SymbolsResult:
         """``show symbols [table]`` — all symbols (or only routing tables)."""
-        cmd = "show symbols" + (" table" if table else "")
-        result = self._conn.execute(cmd)
-        return parse_symbols(result)
+        return parse_symbols(self._conn.execute(cmd.build_show_symbols(table=table)))
 
     def show_interfaces(self) -> InterfacesResult:
         """``show interfaces`` — full per-interface block."""
-        result = self._conn.execute("show interfaces")
-        return parse_interfaces(result)
+        return parse_interfaces(self._conn.execute("show interfaces"))
 
     def show_interfaces_summary(self) -> InterfacesSummaryResult:
         """``show interfaces summary`` — one-line summary per interface."""
-        result = self._conn.execute("show interfaces summary")
-        return parse_interfaces_summary(result)
+        return parse_interfaces_summary(self._conn.execute("show interfaces summary"))
 
     def eval(self, expr: str) -> EvalResult:
         """``eval <expr>`` — evaluate a BIRD filter expression.
@@ -311,9 +297,7 @@ class BirdClient:
         ASCII — this preserves wire framing (no command injection) while
         allowing the full filter language.
         """
-        expr = validate_filter_expression(expr, field="expression")
-        result = self._conn.execute(f"eval {expr}")
-        return parse_eval(result)
+        return parse_eval(self._conn.execute(cmd.build_eval(expr)))
 
     # ------------------------------------------------------------------
     # High-level complex-query wrappers
@@ -334,18 +318,14 @@ class BirdClient:
         "no route" is a legitimate answer to a lookup. The raw text always
         reflects exactly what the daemon sent.
         """
-        query = RouteQuery().for_address(address)
-        if table is not None:
-            query = query.table(table)
-        if all:
-            query = query.all_details()
+        wire = cmd.build_route_lookup(address, table=table, all=all)
         try:
-            result = self._conn.execute(query.build())
+            result = self._conn.execute(wire)
         except BirdCommandError as exc:
             if exc.code == 8001:  # "Network not found"
                 return RouteResult(
                     raw_text=exc.message or "Network not found",
-                    command=exc.command or query.build(),
+                    command=exc.command or wire,
                     table=table or "",
                     entries=[],
                     stats={},
@@ -355,11 +335,9 @@ class BirdClient:
 
     def route_exists(self, prefix: str, *, table: str | None = None) -> bool:
         """``True`` if the exact prefix exists in the routing table."""
-        query = RouteQuery().prefix(prefix)
-        if table is not None:
-            query = query.table(table)
+        wire = cmd.build_route_exists(prefix, table=table)
         try:
-            self._conn.execute(query.build())
+            self._conn.execute(wire)
         except BirdCommandError as exc:
             if exc.code == 8001:
                 return False
@@ -373,8 +351,7 @@ class BirdClient:
         daemon only reports the counters, which matters on tables with
         millions of routes).
         """
-        query = RouteQuery().count().table(table) if table is not None else RouteQuery().count().table_all()
-        result = parse_route(self._conn.execute(query.build()))
+        result = parse_route(self._conn.execute(cmd.build_count_routes(table=table)))
         if table is not None:
             value = result.stats.get(f"{table}.routes")
             if value is None:
@@ -395,30 +372,27 @@ class BirdClient:
         block (state, neighbor address/AS/ID, timers, session type, …).
         Pass ``pattern="peer_*"`` to restrict the set.
         """
-        cmd = "show protocols all"
-        if pattern is not None:
-            cmd += " " + format_pattern(pattern, field="pattern")
+        wire = cmd.build_bgp_sessions(pattern)
         try:
-            result = self._conn.execute(cmd)
+            result = self._conn.execute(wire)
         except BirdCommandError as exc:
             if exc.code == 8003:
-                return BgpSessionsResult(raw_text=exc.message or "", command=cmd, sessions=[])
+                return BgpSessionsResult(raw_text=exc.message or "", command=wire, sessions=[])
             raise
         parsed = parse_protocols_all(result)
-        return parse_bgp_sessions(parsed.details, raw_text=parsed.raw_text, command=cmd)
+        return parse_bgp_sessions(parsed.details, raw_text=parsed.raw_text, command=wire)
 
     def find_protocols(self, pattern: str) -> ProtocolsResult:
         """``show protocols <pattern>`` — shell-like pattern matching.
 
         Example patterns: ``"bgp*"`` (all BGP), ``"ospf?"``, ``"static*"``.
         """
-        pattern = validate_pattern(pattern, field="pattern")
-        cmd = f"show protocols {format_pattern(pattern, field='pattern')}"
+        wire = cmd.build_find_protocols(pattern)
         try:
-            result = self._conn.execute(cmd)
+            result = self._conn.execute(wire)
         except BirdCommandError as exc:
             if exc.code == 8003:
-                return ProtocolsResult(raw_text=exc.message or "", command=cmd, rows=[])
+                return ProtocolsResult(raw_text=exc.message or "", command=wire, rows=[])
             raise
         return parse_protocols(result)
 
@@ -452,35 +426,20 @@ class BirdClient:
         check:
             If ``True``, only validate the file — do NOT apply it.
         """
-        # Per BIRD's lexer, the file path MUST be a double-quoted string.
-        # Internal double quotes inside the path are not supported by BIRD;
-        # validate_path rejects them so we never emit a malformed command.
-        quoted = f'"{validate_path(file, field="config file path")}"'
-        if check:
-            cmd = f"configure check {quoted}"
-        else:
-            soft_kw = "soft " if soft else ""
-            if timeout is not None:
-                cmd = f"configure {soft_kw}{quoted} timeout {validate_positive_int(timeout, field='timeout')}"
-            else:
-                cmd = f"configure {soft_kw}{quoted}"
-        result = self._conn.execute(cmd)
-        return parse_configure(result)
+        wire = cmd.build_configure(file, timeout=timeout, soft=soft, check=check)
+        return parse_configure(self._conn.execute(wire))
 
     def configure_status(self) -> ConfigResult:
         """``configure status`` — current reconfiguration state."""
-        result = self._conn.execute("configure status")
-        return parse_configure(result)
+        return parse_configure(self._conn.execute("configure status"))
 
     def configure_confirm(self) -> ConfigResult:
         """``configure confirm`` — confirm a pending reconfiguration."""
-        result = self._conn.execute("configure confirm")
-        return parse_configure(result)
+        return parse_configure(self._conn.execute("configure confirm"))
 
     def configure_undo(self) -> ConfigResult:
         """``configure undo`` — revert to the previous configuration."""
-        result = self._conn.execute("configure undo")
-        return parse_configure(result)
+        return parse_configure(self._conn.execute("configure undo"))
 
     # ------------------------------------------------------------------
     # Per-protocol actions
@@ -488,21 +447,15 @@ class BirdClient:
 
     def enable(self, pattern: str = "all") -> ActionResult:
         """``enable <pattern>`` — enable matching protocols."""
-        wire = format_pattern(pattern, field="pattern")
-        result = self._conn.execute(f"enable {wire}")
-        return parse_action(result)
+        return parse_action(self._conn.execute(cmd.build_enable(pattern)))
 
     def disable(self, pattern: str = "all") -> ActionResult:
         """``disable <pattern>`` — disable matching protocols."""
-        wire = format_pattern(pattern, field="pattern")
-        result = self._conn.execute(f"disable {wire}")
-        return parse_action(result)
+        return parse_action(self._conn.execute(cmd.build_disable(pattern)))
 
     def restart(self, pattern: str = "all") -> ActionResult:
         """``restart <pattern>`` — restart matching protocols."""
-        wire = format_pattern(pattern, field="pattern")
-        result = self._conn.execute(f"restart {wire}")
-        return parse_action(result)
+        return parse_action(self._conn.execute(cmd.build_restart(pattern)))
 
     def reload(self, pattern: str = "all", *, direction: str = "both") -> ActionResult:
         """``reload [in|out] <pattern>`` — reload routes for matching protocols.
@@ -512,11 +465,7 @@ class BirdClient:
         may fail on BIRD 3.x; use ``direction="in"`` or ``direction="out"``
         for compatibility with BIRD 3.x.
         """
-        direction = validate_choice(direction, ("both", "in", "out"), field="direction")
-        wire = format_pattern(pattern, field="pattern")
-        cmd = f"reload {wire}" if direction == "both" else f"reload {direction} {wire}"
-        result = self._conn.execute(cmd)
-        return parse_action(result)
+        return parse_action(self._conn.execute(cmd.build_reload(pattern, direction=direction)))
 
     def dump(self, kind: str, file: str) -> ActionResult:
         """``dump <kind> "<file>"`` — write a runtime dump to <file>.
@@ -525,15 +474,144 @@ class BirdClient:
         ``events``, ``interfaces``, ``neighbors``, ``attributes``,
         ``routes``, ``protocols``, ``filter all``.
         """
-        valid = {
-            "resources", "sockets", "ao keys", "events", "interfaces",
-            "neighbors", "attributes", "routes", "protocols", "filter all",
-        }
-        kind = validate_choice(kind, valid, field="dump kind")
-        path = validate_path(file, field="dump file path")
-        cmd = f'dump {kind} "{path}"'
-        result = self._conn.execute(cmd)
-        return parse_action(result)
+        return parse_action(self._conn.execute(cmd.build_dump(kind, file)))
+
+    # ------------------------------------------------------------------
+    # Protocol-specific show commands
+    # ------------------------------------------------------------------
+
+    def show_static(self, pattern: str | None = None) -> StaticResult:
+        """``show static [<name>]`` — routes of one (or the only) static protocol."""
+        return parse_static(self._conn.execute(cmd.build_show_static(pattern)))
+
+    def show_ospf(self, pattern: str | None = None) -> OspfInfo:
+        """``show ospf [<name>]`` — per-protocol area summary.
+
+        When several OSPF protocols run, the daemon requires an explicit
+        name (``proto_get_named`` errors with "multiple protocols").
+        """
+        return parse_ospf(self._conn.execute(cmd.build_show_ospf(pattern)))
+
+    def show_ospf_neighbors(
+        self,
+        pattern: str | None = None,
+        interface: str | None = None,
+    ) -> OspfNeighborsResult:
+        """``show ospf neighbors [<name>] ["<interface>"]`` — neighbor table."""
+        wire = cmd.build_show_ospf_neighbors(pattern, interface)
+        return parse_ospf_neighbors(self._conn.execute(wire))
+
+    def show_ospf_interface(
+        self,
+        pattern: str | None = None,
+        interface: str | None = None,
+    ) -> OspfInterfacesResult:
+        """``show ospf interface [<name>] ["<interface>"]`` — interface details."""
+        wire = cmd.build_show_ospf_interface(pattern, interface)
+        return parse_ospf_interfaces(self._conn.execute(wire))
+
+    def show_ospf_state(self, pattern: str | None = None, *, all: bool = False) -> OspfStateResult:
+        """``show ospf state [<name>] [all]`` — reachable network topology dump."""
+        return parse_ospf_state(self._conn.execute(cmd.build_show_ospf_state(pattern, all=all)))
+
+    def show_ospf_topology(self, pattern: str | None = None, *, all: bool = False) -> OspfStateResult:
+        """``show ospf topology [<name>] [all]`` — same shape as :meth:`show_ospf_state`."""
+        return parse_ospf_state(self._conn.execute(cmd.build_show_ospf_topology(pattern, all=all)))
+
+    def show_ospf_lsadb(
+        self,
+        pattern: str | None = None,
+        *,
+        scope: str = "area",
+        area: str | None = None,
+        lsa_type: int | None = None,
+        lsid: str | None = None,
+        router: str | None = None,
+        self_originated: bool = False,
+    ) -> OspfLsadbResult:
+        """``show ospf lsadb`` — the link-state database.
+
+        Filters mirror the daemon's grammar: ``scope`` (``"global"`` /
+        ``"area"`` / ``"link"``), ``area`` (dotted area ID), ``lsa_type``,
+        ``lsid`` / ``router`` (IPs), ``self_originated``.
+        """
+        wire = cmd.build_show_ospf_lsadb(
+            pattern,
+            scope=scope,
+            area=area,
+            lsa_type=lsa_type,
+            lsid=lsid,
+            router=router,
+            self_originated=self_originated,
+        )
+        return parse_ospf_lsadb(self._conn.execute(wire))
+
+    def show_bfd_sessions(
+        self,
+        pattern: str | None = None,
+        *,
+        address: str | None = None,
+        interface: str | None = None,
+        family: str | None = None,
+        mode: str | None = None,
+        all: bool = False,
+    ) -> BfdSessionsResult:
+        """``show bfd sessions`` — BFD session table.
+
+        Filters: ``pattern`` (protocol name), ``address`` (IP or prefix),
+        ``interface``, ``family`` (``"ipv4"`` / ``"ipv6"``), ``mode``
+        (``"direct"`` / ``"multihop"``). ``all=True`` requests the verbose
+        per-session blocks instead of the table.
+        """
+        wire = cmd.build_show_bfd_sessions(
+            pattern,
+            address=address,
+            interface=interface,
+            family=family,
+            mode=mode,
+            all=all,
+        )
+        return parse_bfd_sessions(self._conn.execute(wire))
+
+    def show_rip_interfaces(
+        self,
+        pattern: str | None = None,
+        interface: str | None = None,
+    ) -> RipInterfacesResult:
+        """``show rip interfaces [<name>] ["<interface>"]`` — RIP interface table."""
+        wire = cmd.build_show_rip_interfaces(pattern, interface)
+        return parse_rip_interfaces(self._conn.execute(wire))
+
+    def show_rip_neighbors(
+        self,
+        pattern: str | None = None,
+        interface: str | None = None,
+    ) -> RipNeighborsResult:
+        """``show rip neighbors [<name>] ["<interface>"]`` — RIP neighbor table."""
+        wire = cmd.build_show_rip_neighbors(pattern, interface)
+        return parse_rip_neighbors(self._conn.execute(wire))
+
+    def show_babel_interfaces(
+        self,
+        pattern: str | None = None,
+        interface: str | None = None,
+    ) -> BabelInterfacesResult:
+        """``show babel interfaces [<name>] ["<interface>"]`` — Babel interface table."""
+        wire = cmd.build_show_babel_interfaces(pattern, interface)
+        return parse_babel_interfaces(self._conn.execute(wire))
+
+    def show_babel_neighbors(
+        self,
+        pattern: str | None = None,
+        interface: str | None = None,
+    ) -> BabelNeighborsResult:
+        """``show babel neighbors [<name>] ["<interface>"]`` — Babel neighbor table."""
+        wire = cmd.build_show_babel_neighbors(pattern, interface)
+        return parse_babel_neighbors(self._conn.execute(wire))
+
+    def show_mpls_ranges(self) -> MplsRangesResult:
+        """``show mpls ranges`` — label ranges of every MPLS domain."""
+        return parse_mpls_ranges(self._conn.execute(cmd.build_show_mpls_ranges()))
 
     # ------------------------------------------------------------------
     # Session control
@@ -551,8 +629,7 @@ class BirdClient:
         """
         # `restrict` always returns code 0016 (which is < 8000, so it is
         # treated as success by the connection layer).
-        result = self._conn.execute("restrict")
-        return parse_action(result)
+        return parse_action(self._conn.execute("restrict"))
 
     def down(self) -> ActionResult:
         """``down`` — request a clean daemon shutdown.
@@ -560,13 +637,11 @@ class BirdClient:
         The daemon will exit shortly after this command; subsequent
         commands will fail with :class:`~bird_api.exceptions.BirdConnectionError`.
         """
-        result = self._conn.execute("down")
-        return parse_action(result)
+        return parse_action(self._conn.execute("down"))
 
     def graceful_restart(self) -> ActionResult:
         """``graceful restart`` — request a graceful restart."""
-        result = self._conn.execute("graceful restart")
-        return parse_action(result)
+        return parse_action(self._conn.execute("graceful restart"))
 
     # ------------------------------------------------------------------
     # Escape hatch — for commands not yet wrapped by a method.
@@ -629,10 +704,3 @@ class BirdClient:
             f"BirdClient(socket_path={self.socket_path!r}, "
             f"connected={self.is_connected}, version={self.server_version!r})"
         )
-
-    # Allow `getattr(client, 'some_attr')` to fall through to the connection
-    # for advanced use (e.g. setting timeout after construction).
-    def __getattr__(self, name: str) -> Any:
-        # Only called when normal attribute lookup fails.
-        # Avoid infinite recursion by accessing _conn directly.
-        return getattr(self.__dict__["_conn"], name)

@@ -32,12 +32,23 @@ Example
 ...     for entry in client.show_route_query(q).entries:
 ...         print(entry.prefix, entry.preference)
 
+Asynchronous usage:
+
+>>> import asyncio
+>>> from bird_api import AsyncBirdClient
+>>> async def main():
+...     async with AsyncBirdClient(socket_path="/tmp/bird.ctl") as client:
+...         return await client.count_routes(table="master4")
+>>> asyncio.run(main())
+
 See ``README.md`` for installation instructions and the design notes in
 ``docs/bird-protocol-research.md`` for protocol details.
 """
 
 from __future__ import annotations
 
+from .async_client import AsyncBirdClient
+from .async_connection import AsyncBirdConnection
 from .client import BirdClient
 from .connection import DEFAULT_SOCKET_PATH, DEFAULT_TIMEOUT, BirdConnection
 from .exceptions import (
@@ -51,6 +62,13 @@ from .exceptions import (
 )
 from .models import (
     ActionResult,
+    BabelInterfaceRow,
+    BabelInterfacesResult,
+    BabelNeighborRow,
+    BabelNeighborsResult,
+    BfdSessionDetail,
+    BfdSessionRow,
+    BfdSessionsResult,
     BgpSession,
     BgpSessionsResult,
     ChannelState,
@@ -63,13 +81,32 @@ from .models import (
     InterfaceSummaryRow,
     MemoryInfo,
     MemoryRow,
+    MplsDomainRanges,
+    MplsRangeRow,
+    MplsRangesResult,
+    OspfArea,
+    OspfInfo,
+    OspfInterface,
+    OspfInterfacesResult,
+    OspfLsadbResult,
+    OspfLsadbScope,
+    OspfLsaRow,
+    OspfNeighborRow,
+    OspfNeighborsResult,
+    OspfStateResult,
     ParsedResponse,
     ProtocolDetail,
     ProtocolRow,
     ProtocolsAllResult,
     ProtocolsResult,
+    RipInterfaceRow,
+    RipInterfacesResult,
+    RipNeighborRow,
+    RipNeighborsResult,
     RouteEntry,
     RouteResult,
+    StaticResult,
+    StaticRoute,
     Status,
     Symbol,
     SymbolsResult,
@@ -84,12 +121,14 @@ from .protocol import (
 )
 from .queries import RouteFilter, RouteQuery
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     # Client
     "BirdClient",
     "BirdConnection",
+    "AsyncBirdClient",
+    "AsyncBirdConnection",
     # Complex query builders
     "RouteQuery",
     "RouteFilter",
@@ -120,6 +159,32 @@ __all__ = [
     "ActionResult",
     "BgpSession",
     "BgpSessionsResult",
+    "StaticRoute",
+    "StaticResult",
+    "OspfArea",
+    "OspfInfo",
+    "OspfNeighborRow",
+    "OspfNeighborsResult",
+    "OspfInterface",
+    "OspfInterfacesResult",
+    "OspfStateResult",
+    "OspfLsaRow",
+    "OspfLsadbScope",
+    "OspfLsadbResult",
+    "BfdSessionRow",
+    "BfdSessionDetail",
+    "BfdSessionsResult",
+    "RipInterfaceRow",
+    "RipInterfacesResult",
+    "RipNeighborRow",
+    "RipNeighborsResult",
+    "BabelInterfaceRow",
+    "BabelInterfacesResult",
+    "BabelNeighborRow",
+    "BabelNeighborsResult",
+    "MplsRangeRow",
+    "MplsDomainRanges",
+    "MplsRangesResult",
     # Protocol
     "CommandResult",
     "ReplyLine",

@@ -1,0 +1,3 @@
+1022-rip_test:
+ IP address                Interface  Metric Routes    Seen
+0000 
